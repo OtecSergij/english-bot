@@ -2,14 +2,13 @@ import { Bot, session } from 'grammy';
 import { config } from './config';
 import { initialSession, type MyContext } from './context';
 import { ensureUser } from './db/users';
-import { createDeps } from './deps';
+import type { AppDeps } from './deps';
 import { createAddFeature } from './features/add';
 import { createReviewFeature } from './features/review';
 import { createSettingsFeature } from './features/settings';
 import { createTestFeature } from './features/test';
 
-export function createBot(): Bot<MyContext> {
-  const deps = createDeps();
+export function createBot(deps: AppDeps): Bot<MyContext> {
   const bot = new Bot<MyContext>(config.botToken);
 
   // Single-user whitelist — the only security boundary (design-doc.md §2).
@@ -26,7 +25,7 @@ export function createBot(): Bot<MyContext> {
 
   // /start provisions the user row + default settings (design-doc.md §2).
   bot.command('start', async (ctx) => {
-    if (ctx.chat) await ensureUser(deps.db, ctx.chat.id);
+    if (ctx.chat) await ensureUser(deps.db, ctx.chat.id, config.ownerTz);
     await ctx.reply('Привет! Пришли слово (рус/англ), чтобы добавить его в словарь.');
   });
 

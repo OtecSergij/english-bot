@@ -6,13 +6,15 @@ export type DateStr = string; // 'YYYY-MM-DD'
 
 /** Calendar date (YYYY-MM-DD) that is "today" in the given IANA timezone. */
 export function todayInTz(now: Date, timeZone: string): DateStr {
-  // en-CA renders as YYYY-MM-DD.
-  return new Intl.DateTimeFormat('en-CA', {
+  // formatToParts avoids any dependency on the locale's assembled date format.
+  const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  }).format(now);
+  }).formatToParts(now);
+  const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
 /** Add N calendar days to a YYYY-MM-DD string. Pure date arithmetic in UTC. */

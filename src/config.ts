@@ -14,6 +14,18 @@ function requiredInt(name: string): number {
   return n;
 }
 
+function optionalTz(name: string, fallback: string): string {
+  const value = process.env[name];
+  if (!value) return fallback;
+  try {
+    // Throws RangeError for an unknown IANA timezone.
+    Intl.DateTimeFormat('en-US', { timeZone: value });
+  } catch {
+    throw new Error(`Env var ${name} is not a valid IANA timezone: ${value}`);
+  }
+  return value;
+}
+
 export const config = {
   botToken: required('BOT_TOKEN'),
   yandexDictKey: required('YANDEX_DICT_KEY'),
@@ -21,4 +33,6 @@ export const config = {
   databaseUrl: required('DATABASE_URL'),
   // The only security boundary — must be a real integer, not NaN (design-doc.md §2).
   ownerChatId: requiredInt('OWNER_CHAT_ID'),
+  // Owner timezone for SRS dates; temporary single-user solution (known_issues.md §6).
+  ownerTz: optionalTz('OWNER_TZ', 'UTC'),
 } as const;
