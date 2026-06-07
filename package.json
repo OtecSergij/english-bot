@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "test": "node --import tsx --test src/lib/*.test.ts",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push"
@@ -20,12 +20,15 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@ai-sdk/groq": "^3.0.39",
     "@grammyjs/conversations": "^2.1.1",
+    "ai": "^6.0.197",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
     "grammy": "^1.43.0",
     "node-cron": "^4.2.1",
-    "pg": "^8.21.0"
+    "pg": "^8.21.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

@@ -1,6 +1,12 @@
 import { Bot, session } from 'grammy';
+import { conversations } from '@grammyjs/conversations';
 import { config } from './config';
-import { initialSession, type MyContext } from './context';
+import {
+  initialSession,
+  type BaseContext,
+  type MyContext,
+  type MyConversationContext,
+} from './context';
 import { ensureUser } from './db/users';
 import type { AppDeps } from './deps';
 import { createAddFeature } from './features/add';
@@ -18,6 +24,9 @@ export function createBot(deps: AppDeps): Bot<MyContext> {
   });
 
   bot.use(session({ initial: initialSession }));
+  // Conversations power the multi-step add-word flow (design-doc.md §4). Must be
+  // installed after session and before any createConversation() in the features.
+  bot.use(conversations<BaseContext, MyConversationContext>());
 
   bot.catch((err) => {
     console.error(`Error handling update ${err.ctx.update.update_id}:`, err.error);

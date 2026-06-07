@@ -13,8 +13,12 @@ export interface FallbackTranslation {
 }
 
 export interface LlmProvider {
-  /** Generate one example sentence for a (word, chosen translation) pair. */
-  generateExample(word: string, translation: string, direction: Direction): Promise<Example>;
+  /**
+   * Generate one RU→EN example pair for a (russian, english) word pair: `ru` is a
+   * natural Russian sentence containing the Russian word, `en` is its English
+   * translation containing the English word (design-doc.md §4).
+   */
+  generateExample(russian: string, english: string): Promise<Example>;
   /** Rare-word fallback: translation + example in one call (source=fallback). */
   fallbackTranslate(word: string, direction: Direction): Promise<FallbackTranslation>;
 }

@@ -12,12 +12,13 @@ test('normalizeAnswer strips a leading article and "to"', () => {
   assert.equal(normalizeAnswer('to go'), 'go');
 });
 
-test('isCorrect matches any accepted answer, article-insensitive', () => {
-  assert.equal(isCorrect('home', ['house', 'home']), true);
-  assert.equal(isCorrect('a house', ['house']), true);
+test('isCorrect matches the answer, article/"to"-insensitive', () => {
+  assert.equal(isCorrect('home', 'home'), true);
+  assert.equal(isCorrect('a house', 'house'), true);
+  assert.equal(isCorrect('to go', 'go'), true);
 });
 
-test('isCorrect rejects synonyms not in the set and typos', () => {
-  assert.equal(isCorrect('dwelling', ['house', 'home']), false);
-  assert.equal(isCorrect('hause', ['house']), false);
+test('isCorrect rejects a different word and typos', () => {
+  assert.equal(isCorrect('dwelling', 'house'), false);
+  assert.equal(isCorrect('hause', 'house'), false);
 });

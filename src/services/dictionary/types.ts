@@ -1,17 +1,19 @@
 import type { Direction } from '../../domain';
 
+/** One MEANING of a word (a Yandex `tr`), not a part-of-speech group. */
 export interface DictionarySense {
+  /** Part of speech, for context. */
   pos?: string;
-  /** Russian gloss to label the sense in a chooser (from Yandex `tr.mean`). */
+  /** Russian disambiguation gloss (Yandex `tr.mean`) — used in the chooser label. */
   gloss?: string;
-  /** Accepted translations for this sense (top-N). */
-  translations: string[];
+  /** The single accepted translation for this meaning (design-doc.md §4). */
+  translation: string;
 }
 
 export interface DictionaryResult {
   word: string;
   direction: Direction;
-  /** Empty array => not found; caller falls back to the LLM. */
+  /** One entry per meaning. Empty => not found; caller falls back to the LLM. */
   senses: DictionarySense[];
 }
 

@@ -39,8 +39,8 @@ export const words = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     // Russian side — always a single prompt word (design-doc.md §4).
     russian: text('russian').notNull(),
-    // English side — set of accepted answers (top-N of the chosen sense).
-    english: text('english').array().notNull(),
+    // English side — the single accepted answer (design-doc.md §4).
+    english: text('english').notNull(),
     exampleRu: text('example_ru'),
     exampleEn: text('example_en'),
     source: wordSource('source').notNull(),

@@ -11,8 +11,7 @@ export function normalizeAnswer(input: string): string {
   return s.trim();
 }
 
-/** Correct = normalized input matches any accepted answer in the set. */
-export function isCorrect(input: string, acceptedAnswers: readonly string[]): boolean {
-  const norm = normalizeAnswer(input);
-  return acceptedAnswers.some((answer) => normalizeAnswer(answer) === norm);
+/** Correct = normalized input matches the (single) card answer (design-doc.md §6). */
+export function isCorrect(input: string, answer: string): boolean {
+  return normalizeAnswer(input) === normalizeAnswer(answer);
 }
