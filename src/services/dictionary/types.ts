@@ -1,4 +1,4 @@
-import type { Direction } from '../../lib/lang';
+import type { Direction } from '../../domain';
 
 export interface DictionarySense {
   pos?: string;

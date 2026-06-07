@@ -11,9 +11,13 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
+    "test": "node --import tsx --test src/lib/*.test.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push"
+  },
+  "engines": {
+    "node": ">=22"
   },
   "dependencies": {
     "@grammyjs/conversations": "^2.1.1",

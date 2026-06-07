@@ -1,15 +1,18 @@
 import { Bot, session } from 'grammy';
 import { config } from './config';
 import { initialSession, type MyContext } from './context';
-import { addFeature } from './features/add';
-import { reviewFeature } from './features/review';
-import { settingsFeature } from './features/settings';
-import { testFeature } from './features/test';
+import { ensureUser } from './db/users';
+import { createDeps } from './deps';
+import { createAddFeature } from './features/add';
+import { createReviewFeature } from './features/review';
+import { createSettingsFeature } from './features/settings';
+import { createTestFeature } from './features/test';
 
 export function createBot(): Bot<MyContext> {
+  const deps = createDeps();
   const bot = new Bot<MyContext>(config.botToken);
 
-  // Single-user whitelist (design-doc.md §2).
+  // Single-user whitelist — the only security boundary (design-doc.md §2).
   bot.use(async (ctx, next) => {
     if (ctx.chat?.id !== config.ownerChatId) return;
     await next();
@@ -17,15 +20,22 @@ export function createBot(): Bot<MyContext> {
 
   bot.use(session({ initial: initialSession }));
 
+  bot.catch((err) => {
+    console.error(`Error handling update ${err.ctx.update.update_id}:`, err.error);
+  });
+
+  // /start provisions the user row + default settings (design-doc.md §2).
   bot.command('start', async (ctx) => {
+    if (ctx.chat) await ensureUser(deps.db, ctx.chat.id);
     await ctx.reply('Привет! Пришли слово (рус/англ), чтобы добавить его в словарь.');
   });
 
-  // Commands first, then free-text add.
-  bot.use(reviewFeature);
-  bot.use(testFeature);
-  bot.use(settingsFeature);
-  bot.use(addFeature);
+  // Commands resolve inside each feature; mode-gated free text excludes commands,
+  // so a command is never swallowed by another mode's text handler (design-doc.md §8).
+  bot.use(createReviewFeature(deps));
+  bot.use(createTestFeature(deps));
+  bot.use(createSettingsFeature(deps));
+  bot.use(createAddFeature(deps));
 
   return bot;
 }

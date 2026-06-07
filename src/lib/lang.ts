@@ -1,5 +1,4 @@
-export type Lang = 'ru' | 'en';
-export type Direction = 'ru-en' | 'en-ru';
+import type { Direction, Lang } from '../domain';
 
 const CYRILLIC = /[Ѐ-ӿ]/;
 

@@ -1,3 +1,5 @@
+import { addDays, type DateStr } from './dates';
+
 // Spaced-repetition interval ladder (design-doc.md §7). Tunable.
 export const LADDER_DAYS = [1, 3, 7, 14, 30, 60, 120, 240] as const;
 
@@ -21,9 +23,11 @@ export function reset(): number {
   return 0;
 }
 
-/** Next review date (date-only) computed from `from` — always from today, no compounding. */
-export function nextReviewDate(from: Date, index: number): Date {
-  const d = new Date(from);
-  d.setDate(d.getDate() + intervalDays(index));
-  return d;
+/**
+ * Next review date = `today` + ladder[index], computed calendar-wise.
+ * `today` must be a date in the user's timezone (see dates.todayInTz). Always
+ * from today, not the old due date — overdue-ness does not compound (design-doc.md §7).
+ */
+export function nextReviewDate(today: DateStr, index: number): DateStr {
+  return addDays(today, intervalDays(index));
 }

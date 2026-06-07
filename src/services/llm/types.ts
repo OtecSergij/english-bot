@@ -1,4 +1,4 @@
-import type { Direction } from '../../lib/lang';
+import type { Direction } from '../../domain';
 
 export interface Example {
   /** Sentence in Russian (cards are always RU→EN, design-doc.md §4). */

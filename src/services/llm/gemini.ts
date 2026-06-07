@@ -1,4 +1,4 @@
-import type { Direction } from '../../lib/lang';
+import type { Direction } from '../../domain';
 import type { Example, FallbackTranslation, LlmProvider } from './types';
 
 /**

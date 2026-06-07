@@ -1,17 +1,27 @@
 import { Composer } from 'grammy';
-import type { MyContext } from '../context';
+import { freeTextIn, type MyContext } from '../context';
+import type { AppDeps } from '../deps';
 
 /** Daily review flow — STUB (design-doc.md §5). */
-export const reviewFeature = new Composer<MyContext>();
+export function createReviewFeature(_deps: AppDeps): Composer<MyContext> {
+  const feature = new Composer<MyContext>();
 
-reviewFeature.command('repeat', async (ctx) => {
-  await ctx.reply(
-    'TODO: повторение — слова due, спойлер-перевод, «Помню/Не помню» (design-doc.md §5)',
-  );
-});
+  feature.command('repeat', async (ctx) => {
+    await ctx.reply(
+      'TODO: повторение — слова due, спойлер-перевод, «Помню/Не помню» (design-doc.md §5)',
+    );
+  });
 
-// «Помню» / «Не помню» button presses.
-reviewFeature.callbackQuery(/^review:(remember|forget):\d+$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  // TODO: update SRS for the word, send the next card.
-});
+  // §5: any free text while in REVIEW re-shows the current card.
+  feature.filter(freeTextIn('review')).on('message:text', async (ctx) => {
+    await ctx.reply('TODO: повторение — повторно показать текущую карточку (design-doc.md §5)');
+  });
+
+  // «Помню» / «Не помню» button presses.
+  feature.callbackQuery(/^review:(remember|forget):\d+$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    // TODO: update SRS for the word, send the next card.
+  });
+
+  return feature;
+}
