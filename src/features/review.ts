@@ -1,18 +1,14 @@
 import { Composer, InlineKeyboard } from 'grammy';
 import { config } from '../config';
-import { freeTextIn, type MyContext, type ReviewState } from '../context';
+import { freeTextIn, nonTextIn, testExpired, type MyContext, type ReviewState } from '../context';
 import { ensureUser, getUserContext } from '../db/users';
-import {
-  countWords,
-  nextReviewWord,
-  updateWordSchedule,
-  wordById,
-  type ReviewWord,
-} from '../db/words';
+import { countWords, nextReviewWord, updateWordSchedule, type ReviewWord } from '../db/words';
 import type { AppDeps } from '../deps';
 import { todayInTz } from '../lib/dates';
 import { escapeHtml } from '../lib/html';
 import { nextReviewDate, promote, reset } from '../lib/srs';
+import { deleteFlowMessage, editFlow, resetSession } from './flow';
+import { discardTest } from './test';
 
 /**
  * Pure session-end check (design-doc.md §5): the session is done once `done` cards
@@ -24,61 +20,49 @@ export function sessionComplete(done: number, total: number): boolean {
 }
 
 /**
- * Render a review card (design-doc.md §5). The answer and the example's English
- * half are blurred with a native spoiler so you recall before revealing:
- *
- *   дом: ▒▒▒▒▒
- *   Пример: Мой дом большой. — ▒▒▒▒▒▒▒▒▒▒▒
+ * The HIDDEN review card (design-doc.md §5): the prompt side only — Russian word
+ * (+ the Russian example as a hint). The English answer is revealed by the
+ * «Показать ответ» button (a native spoiler leaks its revealed state across edits
+ * of the one session message, so we hide by omission instead). First line: `N/total`.
  */
-export function renderReviewCard(card: ReviewWord): string {
+export function renderReviewQuestion(done: number, total: number, card: ReviewWord): string {
+  const lines = [`${done + 1}/${total}`, `<b>${escapeHtml(card.russian)}</b>`];
+  if (card.exampleRu) lines.push(`Пример: ${escapeHtml(card.exampleRu)}`);
+  return lines.join('\n');
+}
+
+/** The REVEALED review card (design-doc.md §5): adds the English answer + example half. */
+export function renderReviewAnswer(done: number, total: number, card: ReviewWord): string {
   const lines = [
-    `<b>${escapeHtml(card.russian)}</b>: <tg-spoiler>${escapeHtml(card.english)}</tg-spoiler>`,
+    `${done + 1}/${total}`,
+    `<b>${escapeHtml(card.russian)}</b> — ${escapeHtml(card.english)}`,
   ];
   if (card.exampleRu && card.exampleEn) {
-    lines.push(
-      `Пример: ${escapeHtml(card.exampleRu)} — <tg-spoiler>${escapeHtml(card.exampleEn)}</tg-spoiler>`,
-    );
+    lines.push(`Пример: ${escapeHtml(card.exampleRu)} — ${escapeHtml(card.exampleEn)}`);
   }
   return lines.join('\n');
 }
 
-/** The card with its `step/total` progress header (the single message's contents). */
-function renderStep(done: number, total: number, card: ReviewWord): string {
-  return `${done + 1}/${total}\n${renderReviewCard(card)}`;
+/** Hidden card: reveal + grade (grading without revealing stays allowed, as with the old spoiler). */
+function hiddenKeyboard(id: number): InlineKeyboard {
+  return new InlineKeyboard()
+    .text('Показать ответ', `review:reveal:${id}`)
+    .row()
+    .text('Помню', `review:remember:${id}`)
+    .text('Не помню', `review:forget:${id}`);
 }
 
-function reviewKeyboard(id: number): InlineKeyboard {
+/** Revealed card: just the grade buttons. */
+function gradeKeyboard(id: number): InlineKeyboard {
   return new InlineKeyboard()
     .text('Помню', `review:remember:${id}`)
     .text('Не помню', `review:forget:${id}`);
 }
 
-/** Edit the single flow message (the whole session lives in it). Best-effort. */
-function editFlow(
-  ctx: MyContext,
-  messageId: number,
-  text: string,
-  keyboard?: InlineKeyboard,
-): Promise<unknown> {
-  const chatId = ctx.chat?.id;
-  if (chatId === undefined) return Promise.resolve(undefined);
-  return ctx.api
-    .editMessageText(chatId, messageId, text, { parse_mode: 'HTML', reply_markup: keyboard })
-    .catch(() => undefined);
-}
-
-function endSession(ctx: MyContext): void {
-  ctx.session.mode = 'idle';
-  ctx.session.review = undefined;
-}
-
 /** Close the session: nothing to show at the end, just delete the flow message (to-do §UX). */
 async function finishFlow(ctx: MyContext, review: ReviewState): Promise<void> {
-  const chatId = ctx.chat?.id;
-  if (chatId !== undefined) {
-    await ctx.api.deleteMessage(chatId, review.messageId).catch(() => undefined);
-  }
-  endSession(ctx);
+  await deleteFlowMessage(ctx, review.messageId);
+  resetSession(ctx);
 }
 
 /**
@@ -91,10 +75,18 @@ async function startReview(deps: AppDeps, ctx: MyContext): Promise<void> {
   const chatId = ctx.chat?.id;
   if (chatId === undefined) return;
 
-  // Re-entering mid-session must NOT restart (that would reset the seen-set / size).
-  // The card is already on screen, so do nothing. (Phase 4: a guard for
-  // `mode === 'test'` belongs with the test flow.)
-  if (ctx.session.mode === 'review') return;
+  // Re-entry / cross-mode / desync handling (design-doc.md §8).
+  if (ctx.session.mode === 'review') {
+    if (ctx.session.review) return; // genuine re-entry: card already on screen, don't restart
+    resetSession(ctx); // desync (mode without state) — fall through and start fresh
+  } else if (ctx.session.mode === 'test') {
+    // Don't clobber a LIVE test; an expired or desynced one is dropped so review can run.
+    if (ctx.session.test && !testExpired(ctx.session.test, Date.now())) {
+      await ctx.reply('Сейчас идёт тест — заверши его, прежде чем начинать повторение.');
+      return;
+    }
+    await discardTest(ctx);
+  }
 
   // Provision on entry (covers a fresh owner / DB reset), then read settings.
   await ensureUser(deps.db, chatId, config.ownerTz);
@@ -107,7 +99,7 @@ async function startReview(deps: AppDeps, ctx: MyContext): Promise<void> {
   const deckSize = await countWords(deps.db, user.userId);
   const first = deckSize > 0 ? await nextReviewWord(deps.db, user.userId, []) : null;
   if (!first) {
-    endSession(ctx);
+    resetSession(ctx);
     await ctx.reply('В словаре пока нет слов — добавь хотя бы одно.');
     return;
   }
@@ -115,50 +107,65 @@ async function startReview(deps: AppDeps, ctx: MyContext): Promise<void> {
   // max(1, …): a non-empty deck always shows ≥1 card — guards a future
   // review_count = 0 (Phase 6 settings should also validate it; to-do).
   const total = Math.max(1, Math.min(user.reviewCount, deckSize));
-  const msg = await ctx.reply(renderStep(0, total, first), {
+  const msg = await ctx.reply(renderReviewQuestion(0, total, first), {
     parse_mode: 'HTML',
-    reply_markup: reviewKeyboard(first.id),
+    reply_markup: hiddenKeyboard(first.id),
   });
   ctx.session.mode = 'review';
-  ctx.session.review = { total, seenIds: [], currentWordId: first.id, messageId: msg.message_id };
+  ctx.session.review = {
+    total,
+    seenIds: [],
+    current: first,
+    messageId: msg.message_id,
+    userId: user.userId,
+    timezone: user.timezone,
+  };
+}
+
+/** «Показать ответ» — reveal the answer in place (no DB write); the card stays awaiting a grade. */
+async function handleReveal(ctx: MyContext): Promise<void> {
+  const review = ctx.session.review;
+  if (ctx.session.mode !== 'review' || !review || !review.current) {
+    await ctx.answerCallbackQuery({ text: 'Эта сессия повторения уже завершена.' });
+    return;
+  }
+  if (Number(ctx.match?.[1]) !== review.current.id) {
+    await ctx.answerCallbackQuery({ text: 'Эта карточка уже пройдена.' });
+    return;
+  }
+  await ctx.answerCallbackQuery();
+  await editFlow(
+    ctx,
+    review.messageId,
+    renderReviewAnswer(review.seenIds.length, review.total, review.current),
+    gradeKeyboard(review.current.id),
+  );
 }
 
 /** A grade button was pressed — apply SRS, then edit the flow message to the next card. */
 async function handlePress(deps: AppDeps, ctx: MyContext): Promise<void> {
   const review = ctx.session.review;
-  if (ctx.session.mode !== 'review' || !review) {
+  if (ctx.session.mode !== 'review' || !review || !review.current) {
     await ctx.answerCallbackQuery({ text: 'Эта сессия повторения уже завершена.' });
     return;
   }
 
   const remembered = ctx.match?.[1] === 'remember';
-  const pressedId = Number(ctx.match?.[2]);
-  if (review.currentWordId === null || pressedId !== review.currentWordId) {
+  const card = review.current;
+  if (Number(ctx.match?.[2]) !== card.id) {
     await ctx.answerCallbackQuery({ text: 'Эта карточка уже пройдена.' });
     return;
   }
 
-  const chatId = ctx.chat?.id;
-  if (chatId === undefined) {
-    await ctx.answerCallbackQuery();
-    return;
-  }
-  const user = await getUserContext(deps.db, chatId);
-  if (!user) {
-    await ctx.answerCallbackQuery();
-    await finishFlow(ctx, review);
-    return;
-  }
-  const today = todayInTz(new Date(), user.timezone);
-
+  // userId + timezone are snapshotted in the session (stable); `today` is recomputed
+  // here so a long session that crosses midnight still schedules correctly. The
+  // current card carries `intervalIndex`, so no DB re-fetch is needed to grade.
+  const today = todayInTz(new Date(), review.timezone);
   try {
-    const word = await wordById(deps.db, user.userId, pressedId);
-    if (word) {
-      const index = remembered ? promote(word.intervalIndex) : reset();
-      await updateWordSchedule(deps.db, user.userId, pressedId, index, nextReviewDate(today, index));
-    }
+    const index = remembered ? promote(card.intervalIndex) : reset();
+    await updateWordSchedule(deps.db, review.userId, card.id, index, nextReviewDate(today, index));
   } catch (err) {
-    // The write didn't commit — keep the card (currentWordId unchanged) for a retry.
+    // The write didn't commit — keep the card (current unchanged) for a retry.
     console.error('Failed to apply review outcome:', err);
     await ctx.answerCallbackQuery({ text: 'Не удалось сохранить, нажми ещё раз.' });
     return;
@@ -166,10 +173,10 @@ async function handlePress(deps: AppDeps, ctx: MyContext): Promise<void> {
   await ctx.answerCallbackQuery();
 
   // Card consumed: record it (counts toward the session AND excludes it from the
-  // next pick) and drop currentWordId BEFORE advancing so a stale/double press
-  // can't re-grade it.
-  review.seenIds.push(pressedId);
-  review.currentWordId = null;
+  // next pick) and drop `current` BEFORE advancing so a stale/double press can't
+  // re-grade it.
+  review.seenIds.push(card.id);
+  review.current = null;
 
   // Advance. If loading the next card throws (transient DB error in this narrow
   // window), end the session cleanly instead of leaving it stuck with no current
@@ -177,17 +184,17 @@ async function handlePress(deps: AppDeps, ctx: MyContext): Promise<void> {
   try {
     const next = sessionComplete(review.seenIds.length, review.total)
       ? null
-      : await nextReviewWord(deps.db, user.userId, review.seenIds);
+      : await nextReviewWord(deps.db, review.userId, review.seenIds);
     if (!next) {
       await finishFlow(ctx, review);
       return;
     }
-    review.currentWordId = next.id;
+    review.current = next;
     await editFlow(
       ctx,
       review.messageId,
-      renderStep(review.seenIds.length, review.total, next),
-      reviewKeyboard(next.id),
+      renderReviewQuestion(review.seenIds.length, review.total, next),
+      hiddenKeyboard(next.id),
     );
   } catch (err) {
     console.error('Failed to advance review:', err);
@@ -206,6 +213,7 @@ export function createReviewFeature(deps: AppDeps): Composer<MyContext> {
     await startReview(deps, ctx);
   });
 
+  feature.callbackQuery(/^review:reveal:(\d+)$/, (ctx) => handleReveal(ctx));
   feature.callbackQuery(/^review:(remember|forget):(\d+)$/, (ctx) => handlePress(deps, ctx));
 
   // §5 collision: free text during review is noise (no adding words mid-review).
@@ -213,8 +221,15 @@ export function createReviewFeature(deps: AppDeps): Composer<MyContext> {
   // text — nothing is sent back (to-do §UX).
   feature.filter(freeTextIn('review')).on('message:text', async (ctx) => {
     await ctx.deleteMessage().catch(() => undefined);
-    if (!ctx.session.review) endSession(ctx); // desync safety
+    if (!ctx.session.review) resetSession(ctx); // desync safety
   });
+
+  // Non-text strays (sticker, photo, voice, …) are noise too — sweep them so only
+  // the flow message remains. Commands/text are handled above; this never matches
+  // a /command (it has text), so cross-feature command routing is unaffected. (§UX)
+  feature
+    .filter(nonTextIn('review'))
+    .on('message', (ctx) => ctx.deleteMessage().catch(() => undefined));
 
   return feature;
 }

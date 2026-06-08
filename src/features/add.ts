@@ -22,6 +22,7 @@ import { addDays, todayInTz } from '../lib/dates';
 import { escapeHtml } from '../lib/html';
 import { detectLang, lookupDirection } from '../lib/lang';
 import type { DictionarySense } from '../services/dictionary/types';
+import { deleteFlowMessage, editFlow as editFlowMessage } from './flow';
 
 const CONVO_ID = 'add-word';
 
@@ -98,22 +99,24 @@ function makeAddWordConversation(deps: AppDeps) {
 
     // The single evolving message: send once, then edit it on every step.
     const flow = await ctx.reply(`Ищу «${escapeHtml(input)}»…`, { parse_mode: 'HTML' });
+    // The single evolving message — delegates to the shared flow editor, bound to
+    // this flow's message id so call sites stay terse.
     const editFlow = (text: string, keyboard?: InlineKeyboard): Promise<unknown> =>
-      ctx.api
-        .editMessageText(chatId, flow.message_id, text, {
-          parse_mode: 'HTML',
-          reply_markup: keyboard,
-        })
-        .catch(() => undefined);
+      editFlowMessage(ctx, flow.message_id, text, keyboard);
 
-    // Cancel wipes the flow entirely — delete the flow message and the user's word
-    // message, leaving no trace (no lingering «Отменено»; to-do §UX).
     const cancelFlow = async (): Promise<void> => {
-      await ctx.api.deleteMessage(chatId, flow.message_id).catch(() => undefined);
-      if (userMessageId !== undefined) {
-        await ctx.api.deleteMessage(chatId, userMessageId).catch(() => undefined);
-      }
+      await deleteFlowMessage(ctx, flow.message_id);
+      if (userMessageId !== undefined) await deleteFlowMessage(ctx, userMessageId);
     };
+
+    // A stray MESSAGE sent while we wait for a button is noise — delete it so the
+    // chat stays at the single flow message (to-do §UX). Used as `otherwise` on the
+    // waits below (the skipped update is dropped, not re-dispatched). Guarded to
+    // messages only: a non-matching callback must not delete the message it sits on.
+    const dropStray = (c: MyConversationContext): Promise<unknown> =>
+      c.message === undefined
+        ? Promise.resolve(undefined)
+        : c.deleteMessage().catch(() => undefined);
 
     const userId = await conversation.external(() => ensureUser(deps.db, chatId, config.ownerTz));
 
@@ -158,10 +161,11 @@ function makeAddWordConversation(deps: AppDeps) {
         const kb = new InlineKeyboard();
         senses.forEach((_, i) => kb.text(String(i + 1), `${CONVO_ID}:sense:${i}`));
         kb.row().text('Отмена', `${CONVO_ID}:cancel`);
-        await editFlow(`«${escapeHtml(input)}» — выбери значение:\n\n${list}`, kb);
+        await editFlow(`«${escapeHtml(input)}»:\n\n${list}`, kb);
 
         const pick = await conversation.waitForCallbackQuery(
           new RegExp(`^${CONVO_ID}:(sense:\\d+|cancel)$`),
+          { otherwise: dropStray },
         );
         await pick.answerCallbackQuery();
         if (lastSegment(pick.callbackQuery.data) === 'cancel') {
@@ -197,6 +201,7 @@ function makeAddWordConversation(deps: AppDeps) {
     for (;;) {
       const decision = await conversation.waitForCallbackQuery(
         new RegExp(`^${CONVO_ID}:(save|example|translation|cancel)$`),
+        { otherwise: dropStray },
       );
       await decision.answerCallbackQuery();
       const action = lastSegment(decision.callbackQuery.data);
@@ -226,7 +231,7 @@ function makeAddWordConversation(deps: AppDeps) {
             ? 'Пришли исправленный перевод (англ.):'
             : 'Пришли исправленное русское слово-подсказку:',
         );
-        const reply = await conversation.waitFor('message:text');
+        const reply = await conversation.waitFor('message:text', { otherwise: dropStray });
         const text = reply.message.text.trim();
         if (text && !text.startsWith('/')) {
           if (isRu) {
@@ -234,9 +239,13 @@ function makeAddWordConversation(deps: AppDeps) {
           } else {
             // The Russian prompt changed → refresh the soft duplicate check.
             card = { ...card, russian: text };
-            dup = await conversation.external(() => findWordByRussian(deps.db, userId, card.russian));
+            dup = await conversation.external(() =>
+              findWordByRussian(deps.db, userId, card.russian),
+            );
           }
         }
+        // The correction is consumed — delete it so only the flow message remains.
+        await reply.deleteMessage().catch(() => undefined);
       }
       await editFlow(renderCard(card, dup), confirmKeyboard(card.source));
     }
@@ -251,9 +260,7 @@ function makeAddWordConversation(deps: AppDeps) {
       await conversation.external(() => addWord(deps.db, userId, card, nextReview));
       await editFlow(renderCard(card, null, true));
       // Saved → drop the user's original word message so only the ✅ card remains.
-      if (userMessageId !== undefined) {
-        await ctx.api.deleteMessage(chatId, userMessageId).catch(() => undefined);
-      }
+      if (userMessageId !== undefined) await deleteFlowMessage(ctx, userMessageId);
     } catch (err) {
       await conversation.error(err);
       await editFlow('Не удалось сохранить слово. Попробуй позже.');

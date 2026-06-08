@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { renderReviewCard, sessionComplete } from './review';
+import { renderReviewAnswer, renderReviewQuestion, sessionComplete } from './review';
 import type { ReviewWord } from '../db/words';
 
 test('sessionComplete is true once reviewed reaches the session size', () => {
@@ -19,39 +19,43 @@ const base: ReviewWord = {
   intervalIndex: 0,
 };
 
-test('renderReviewCard blurs the answer with a spoiler', () => {
-  assert.equal(renderReviewCard(base), '<b>дом</b>: <tg-spoiler>house</tg-spoiler>');
+test('renderReviewQuestion shows the 1-based step and prompt, hides the answer', () => {
+  assert.equal(renderReviewQuestion(0, 9, base), '1/9\n<b>дом</b>');
 });
 
-test('renderReviewCard adds the example with a spoilered English half', () => {
+test('renderReviewQuestion keeps the Russian example as a hint (no English half)', () => {
+  const card: ReviewWord = {
+    ...base,
+    exampleRu: 'Мой дом большой.',
+    exampleEn: 'My house is big.',
+  };
+  assert.equal(renderReviewQuestion(2, 9, card), '3/9\n<b>дом</b>\nПример: Мой дом большой.');
+});
+
+test('renderReviewAnswer reveals the English answer and the example half', () => {
+  assert.equal(renderReviewAnswer(0, 9, base), '1/9\n<b>дом</b> — house');
   const card: ReviewWord = {
     ...base,
     exampleRu: 'Мой дом большой.',
     exampleEn: 'My house is big.',
   };
   assert.equal(
-    renderReviewCard(card),
-    '<b>дом</b>: <tg-spoiler>house</tg-spoiler>\n' +
-      'Пример: Мой дом большой. — <tg-spoiler>My house is big.</tg-spoiler>',
+    renderReviewAnswer(0, 9, card),
+    '1/9\n<b>дом</b> — house\nПример: Мой дом большой. — My house is big.',
   );
 });
 
-test('renderReviewCard omits the example unless both halves are present', () => {
-  const onlyRu: ReviewWord = { ...base, exampleRu: 'Мой дом.', exampleEn: null };
-  assert.equal(renderReviewCard(onlyRu), '<b>дом</b>: <tg-spoiler>house</tg-spoiler>');
-});
-
-test('renderReviewCard escapes HTML in every field', () => {
+test('renderReviewQuestion / renderReviewAnswer escape HTML in every field', () => {
   const card: ReviewWord = {
     ...base,
     russian: 'a<b',
     english: 'x&y',
     exampleRu: '1<2',
-    exampleEn: '3>2 & true',
+    exampleEn: '3>2',
   };
+  assert.equal(renderReviewQuestion(0, 1, card), '1/1\n<b>a&lt;b</b>\nПример: 1&lt;2');
   assert.equal(
-    renderReviewCard(card),
-    '<b>a&lt;b</b>: <tg-spoiler>x&amp;y</tg-spoiler>\n' +
-      'Пример: 1&lt;2 — <tg-spoiler>3&gt;2 &amp; true</tg-spoiler>',
+    renderReviewAnswer(0, 1, card),
+    '1/1\n<b>a&lt;b</b> — x&amp;y\nПример: 1&lt;2 — 3&gt;2',
   );
 });

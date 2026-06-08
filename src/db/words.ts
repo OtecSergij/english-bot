@@ -1,4 +1,4 @@
-import { and, asc, count, eq, notInArray } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, notInArray, sql } from 'drizzle-orm';
 import type { DB } from './index';
 import { words } from './schema';
 import type { WordCard } from '../lib/card';
@@ -12,6 +12,18 @@ export interface ReviewWord {
   exampleRu: string | null;
   exampleEn: string | null;
   intervalIndex: number;
+}
+
+/**
+ * A word as needed by the test flow (design-doc.md §6). Active recall is RU→EN, so
+ * we only ever show the Russian prompt and grade against the English answer — no
+ * example (it could leak the answer). This is also the in-memory session snapshot
+ * shape (context.ts `TestState.cards`).
+ */
+export interface TestCard {
+  id: number;
+  russian: string;
+  english: string;
 }
 
 const reviewWordColumns = {
@@ -95,16 +107,6 @@ export async function countWords(db: DB, userId: number): Promise<number> {
   return row?.value ?? 0;
 }
 
-/** Fetch one card by id (scoped to the user) — used to grade the current card. */
-export async function wordById(db: DB, userId: number, id: number): Promise<ReviewWord | null> {
-  const [row] = await db
-    .select(reviewWordColumns)
-    .from(words)
-    .where(and(eq(words.userId, userId), eq(words.id, id)))
-    .limit(1);
-  return row ?? null;
-}
-
 /**
  * Persist a word's new SRS schedule after a review/test outcome (design-doc.md §7).
  * The new `interval_index` / `next_review` are computed by the caller via `lib/srs`
@@ -120,5 +122,62 @@ export async function updateWordSchedule(
   await db
     .update(words)
     .set({ intervalIndex, nextReview })
+    .where(and(eq(words.userId, userId), eq(words.id, id)));
+}
+
+/**
+ * The test selection (design-doc.md §6): words currently NOT due (`next_review` in
+ * the future — "parked as known"), least-recently-tested first, then the most
+ * overdue-to-park first (`next_review DESC`), then id for a stable tie-break.
+ * `NULLS FIRST` surfaces never-tested words ahead of tested ones. The caller
+ * snapshots this once — grading stamps `last_tested`, which would otherwise
+ * re-order a re-query mid-session.
+ */
+export async function testWords(
+  db: DB,
+  userId: number,
+  today: DateStr,
+  limit: number,
+): Promise<TestCard[]> {
+  return db
+    .select({ id: words.id, russian: words.russian, english: words.english })
+    .from(words)
+    .where(and(eq(words.userId, userId), gt(words.nextReview, today)))
+    .orderBy(sql`${words.lastTested} asc nulls first`, desc(words.nextReview), asc(words.id))
+    .limit(limit);
+}
+
+/**
+ * A correct test answer (design-doc.md §6): stamp `last_tested`, leave the SRS
+ * schedule untouched (a known word stays parked).
+ */
+export async function markTested(
+  db: DB,
+  userId: number,
+  id: number,
+  testedAt: Date,
+): Promise<void> {
+  await db
+    .update(words)
+    .set({ lastTested: testedAt })
+    .where(and(eq(words.userId, userId), eq(words.id, id)));
+}
+
+/**
+ * A failed test answer / reveal (design-doc.md §6, §7): reset the schedule (the
+ * word drops back into review) AND stamp `last_tested`, in one write. The new
+ * `interval_index` / `next_review` are computed by the caller via `lib/srs`.
+ */
+export async function recordTestFailure(
+  db: DB,
+  userId: number,
+  id: number,
+  intervalIndex: number,
+  nextReview: DateStr,
+  testedAt: Date,
+): Promise<void> {
+  await db
+    .update(words)
+    .set({ intervalIndex, nextReview, lastTested: testedAt })
     .where(and(eq(words.userId, userId), eq(words.id, id)));
 }
