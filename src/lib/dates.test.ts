@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addDays, timeInTz, todayInTz } from './dates';
+import { addDays, hhmm, timeInTz, todayInTz } from './dates';
 
 test('addDays handles simple, month and year rollover', () => {
   assert.equal(addDays('2026-06-06', 1), '2026-06-07');
@@ -26,4 +26,10 @@ test('timeInTz uses h23 (midnight is 00, not 24)', () => {
   const instant = new Date('2026-06-06T21:00:00Z');
   // Moscow is UTC+3 -> 00:00 of the next day (not 24:00).
   assert.equal(timeInTz(instant, 'Europe/Moscow'), '00:00');
+});
+
+test('hhmm truncates a Postgres time to HH:MM and is idempotent', () => {
+  assert.equal(hhmm('09:00:00'), '09:00');
+  assert.equal(hhmm('21:30:45'), '21:30');
+  assert.equal(hhmm('09:00'), '09:00'); // already HH:MM
 });

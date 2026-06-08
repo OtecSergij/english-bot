@@ -4,7 +4,7 @@ import type { MyContext } from '../context';
 import type { DB } from '../db';
 import { getScheduledReviewCandidates, markReviewedToday } from '../db/users';
 import { countWords } from '../db/words';
-import { timeInTz, todayInTz, type DateStr } from '../lib/dates';
+import { hhmm, timeInTz, todayInTz, type DateStr } from '../lib/dates';
 import { reviewSessionSize } from '../lib/srs';
 
 /**
@@ -80,7 +80,7 @@ export function startScheduler(bot: Bot<MyContext>, db: DB): () => void {
         try {
           const today = todayInTz(now, c.timezone);
           const nowHHMM = timeInTz(now, c.timezone);
-          const reviewHHMM = c.reviewTime.slice(0, 5); // 'HH:MM:SS' → 'HH:MM'
+          const reviewHHMM = hhmm(c.reviewTime); // 'HH:MM:SS' → 'HH:MM'
           // Cheap gate first (no DB): skips ~every tick (wrong time / already sent
           // today) before we ever round-trip the deck count.
           if (!isReminderDue({ nowHHMM, reviewHHMM, lastReviewedOn: c.lastReviewedOn, today }))

@@ -34,6 +34,15 @@ export function timeInTz(now: Date, timeZone: string): string {
   return `${get('hour')}:${get('minute')}`;
 }
 
+/**
+ * Truncate a Postgres `time` value ('HH:MM:SS') to 'HH:MM'. Seconds are always zero
+ * for our schedule (minute granularity), and 'HH:MM' is what both the scheduler
+ * (compared against `timeInTz`) and the settings screen use. Idempotent on 'HH:MM'.
+ */
+export function hhmm(time: string): string {
+  return time.slice(0, 5);
+}
+
 /** Add N calendar days to a YYYY-MM-DD string. Pure date arithmetic in UTC. */
 export function addDays(date: DateStr, days: number): DateStr {
   const [y, m, d] = date.split('-');
