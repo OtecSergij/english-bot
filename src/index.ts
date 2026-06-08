@@ -13,7 +13,7 @@ async function main(): Promise<void> {
   await ensureUser(deps.db, config.ownerChatId, config.ownerTz);
 
   await setupCommands(bot);
-  const stopScheduler = startScheduler(bot);
+  const stopScheduler = startScheduler(bot, deps.db);
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`Received ${signal}, shutting down…`);

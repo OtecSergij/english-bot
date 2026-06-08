@@ -60,3 +60,44 @@ export async function getTimezone(db: DB, userId: number): Promise<string | null
     .limit(1);
   return row?.timezone ?? null;
 }
+
+/** A user + the settings the daily scheduler needs to decide whether to remind. */
+export interface ScheduledReviewCandidate {
+  userId: number;
+  tgChatId: number;
+  /** `settings.review_time` as 'HH:MM:SS' (Postgres `time`). */
+  reviewTime: string;
+  timezone: string;
+  reviewCount: number;
+  /** Last daily-review date in the user's TZ ('YYYY-MM-DD'), or null if never. */
+  lastReviewedOn: string | null;
+}
+
+/**
+ * Every user with their schedule fields (design-doc.md §5). The scheduler runs the
+ * time/idempotency check per row in app code (TZ math lives in `lib/dates`), so this
+ * stays a plain join. One row today (whitelist), but written multi-user-ready.
+ */
+export async function getScheduledReviewCandidates(db: DB): Promise<ScheduledReviewCandidate[]> {
+  return db
+    .select({
+      userId: users.id,
+      tgChatId: users.tgChatId,
+      reviewTime: settings.reviewTime,
+      timezone: settings.timezone,
+      reviewCount: settings.reviewCount,
+      lastReviewedOn: users.lastReviewedOn,
+    })
+    .from(users)
+    .innerJoin(settings, eq(settings.userId, users.id));
+}
+
+/**
+ * Stamp today's date (user's TZ) as "daily review handled" (design-doc.md §5).
+ * Called both when the scheduler sends the reminder and when a review actually
+ * starts (manual `/repeat` or the reminder's «Начать») — so a manual run skips the
+ * scheduled one, and the reminder is sent at most once per day. Idempotent per date.
+ */
+export async function markReviewedToday(db: DB, userId: number, date: string): Promise<void> {
+  await db.update(users).set({ lastReviewedOn: date }).where(eq(users.id, userId));
+}

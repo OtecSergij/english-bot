@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addDays, todayInTz } from './dates';
+import { addDays, timeInTz, todayInTz } from './dates';
 
 test('addDays handles simple, month and year rollover', () => {
   assert.equal(addDays('2026-06-06', 1), '2026-06-07');
@@ -13,4 +13,17 @@ test('todayInTz respects the timezone at the day boundary', () => {
   // Moscow is UTC+3 -> 02:30 of the next day.
   assert.equal(todayInTz(instant, 'Europe/Moscow'), '2026-06-07');
   assert.equal(todayInTz(instant, 'UTC'), '2026-06-06');
+});
+
+test('timeInTz returns zero-padded 24h HH:MM in the target zone', () => {
+  const instant = new Date('2026-06-06T06:05:00Z');
+  // Moscow is UTC+3 -> 09:05; zero-padded both fields.
+  assert.equal(timeInTz(instant, 'Europe/Moscow'), '09:05');
+  assert.equal(timeInTz(instant, 'UTC'), '06:05');
+});
+
+test('timeInTz uses h23 (midnight is 00, not 24)', () => {
+  const instant = new Date('2026-06-06T21:00:00Z');
+  // Moscow is UTC+3 -> 00:00 of the next day (not 24:00).
+  assert.equal(timeInTz(instant, 'Europe/Moscow'), '00:00');
 });

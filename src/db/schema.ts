@@ -18,6 +18,12 @@ export const users = pgTable('users', {
   id: serial('id').primaryKey(),
   tgChatId: bigint('tg_chat_id', { mode: 'number' }).notNull().unique(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  // Date (in the user's TZ) of the last daily review we sent/started — the
+  // scheduler's idempotency key (design-doc.md §5): "already handled today" and
+  // "a manual /repeat skips today's scheduled run" both compare against this.
+  // System-tracked state (not a user-editable setting), so it lives on `users`,
+  // not `settings`. NULL = never reviewed.
+  lastReviewedOn: date('last_reviewed_on'),
 });
 
 export const settings = pgTable('settings', {

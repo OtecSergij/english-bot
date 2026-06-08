@@ -1,12 +1,12 @@
 import { Composer, InlineKeyboard } from 'grammy';
 import { config } from '../config';
 import { freeTextIn, nonTextIn, testExpired, type MyContext, type ReviewState } from '../context';
-import { ensureUser, getUserContext } from '../db/users';
+import { ensureUser, getUserContext, markReviewedToday } from '../db/users';
 import { countWords, nextReviewWord, updateWordSchedule, type ReviewWord } from '../db/words';
 import type { AppDeps } from '../deps';
 import { todayInTz } from '../lib/dates';
 import { escapeHtml } from '../lib/html';
-import { nextReviewDate, promote, reset } from '../lib/srs';
+import { nextReviewDate, promote, reset, reviewSessionSize } from '../lib/srs';
 import { deleteFlowMessage, editFlow, resetSession } from './flow';
 import { discardTest } from './test';
 
@@ -69,9 +69,10 @@ async function finishFlow(ctx: MyContext, review: ReviewState): Promise<void> {
  * Start a review session (design-doc.md §5). Review is ALWAYS available: it pulls
  * the N words with the smallest `next_review` (no due gate), N = min(review_count,
  * deck size). The whole session lives in one message. Manual entry for `/repeat`;
- * the scheduler reuses this in Phase 5.
+ * the scheduler's «Начать» button reuses this same path, passing `reuseMessageId`
+ * so its reminder message morphs into the first card instead of a new one.
  */
-async function startReview(deps: AppDeps, ctx: MyContext): Promise<void> {
+async function startReview(deps: AppDeps, ctx: MyContext, reuseMessageId?: number): Promise<void> {
   const chatId = ctx.chat?.id;
   if (chatId === undefined) return;
 
@@ -104,22 +105,41 @@ async function startReview(deps: AppDeps, ctx: MyContext): Promise<void> {
     return;
   }
 
-  // max(1, …): a non-empty deck always shows ≥1 card — guards a future
-  // review_count = 0 (Phase 6 settings should also validate it; to-do).
-  const total = Math.max(1, Math.min(user.reviewCount, deckSize));
-  const msg = await ctx.reply(renderReviewQuestion(0, total, first), {
-    parse_mode: 'HTML',
-    reply_markup: hiddenKeyboard(first.id),
-  });
+  // Session size = review_count capped by deck, floored at 1 (shared rule, so the
+  // scheduler's reminder count can't drift from the actual run — see lib/srs).
+  const total = reviewSessionSize(user.reviewCount, deckSize);
+  // From the scheduler's reminder we EDIT that message into the first card (so it
+  // becomes the single flow message); a manual /repeat sends a fresh message.
+  const questionText = renderReviewQuestion(0, total, first);
+  let messageId: number;
+  if (reuseMessageId !== undefined) {
+    await editFlow(ctx, reuseMessageId, questionText, hiddenKeyboard(first.id));
+    messageId = reuseMessageId;
+  } else {
+    const msg = await ctx.reply(questionText, {
+      parse_mode: 'HTML',
+      reply_markup: hiddenKeyboard(first.id),
+    });
+    messageId = msg.message_id;
+  }
   ctx.session.mode = 'review';
   ctx.session.review = {
     total,
     seenIds: [],
     current: first,
-    messageId: msg.message_id,
+    messageId,
     userId: user.userId,
     timezone: user.timezone,
   };
+
+  // Mark today's daily review as handled (design-doc.md §5): a manual start (or
+  // tapping the reminder) means the scheduler shouldn't also nag today. Non-fatal —
+  // worst case the reminder fires once more today.
+  try {
+    await markReviewedToday(deps.db, user.userId, todayInTz(new Date(), user.timezone));
+  } catch (err) {
+    console.error('Failed to stamp daily review date:', err);
+  }
 }
 
 /** «Показать ответ» — reveal the answer in place (no DB write); the card stays awaiting a grade. */
@@ -211,6 +231,14 @@ export function createReviewFeature(deps: AppDeps): Composer<MyContext> {
   feature.command('repeat', async (ctx) => {
     await ctx.deleteMessage().catch(() => undefined);
     await startReview(deps, ctx);
+  });
+
+  // Scheduler reminder → «Начать» (design-doc.md §5): start review in the SAME
+  // message — `startReview` edits the reminder into the first card. Goes through
+  // normal middleware, so it has a real session (no out-of-band session injection).
+  feature.callbackQuery('review:start', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await startReview(deps, ctx, ctx.callbackQuery.message?.message_id);
   });
 
   feature.callbackQuery(/^review:reveal:(\d+)$/, (ctx) => handleReveal(ctx));
