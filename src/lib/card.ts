@@ -12,6 +12,11 @@ export interface WordCard {
   english: string;
   exampleRu: string | null;
   exampleEn: string | null;
+  /**
+   * Flow-only provenance (design-doc.md §4): drives the pre-save «проверь» nudge for
+   * LLM fallback cards. NOT persisted — after save the user has confirmed the card and
+   * nothing reads it back, so the DB column was dropped (design-doc.md §11).
+   */
   source: WordSource;
 }
 
@@ -61,4 +66,15 @@ export function buildCardFromFallback(
     return { russian: input, english: translation, ...base };
   }
   return { russian: translation, english: input, ...base };
+}
+
+/**
+ * Override a card's translation with the user's own (design-doc.md §4). Sets the side
+ * the user typed, by direction (RU input → english; EN input → the russian prompt),
+ * marks the card non-fallback so the «проверь» nudge drops, and clears the example —
+ * the old one was made for the previous translation, so the caller regenerates it.
+ */
+export function withManualTranslation(card: WordCard, text: string, lang: Lang): WordCard {
+  const base: WordCard = { ...card, source: 'dictionary', exampleRu: null, exampleEn: null };
+  return lang === 'ru' ? { ...base, english: text } : { ...base, russian: text };
 }

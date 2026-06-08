@@ -50,7 +50,6 @@ export async function addWord(
       english: card.english,
       exampleRu: card.exampleRu,
       exampleEn: card.exampleEn,
-      source: card.source,
       nextReview,
     })
     .returning({ id: words.id });

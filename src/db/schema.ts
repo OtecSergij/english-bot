@@ -1,6 +1,5 @@
 import {
   pgTable,
-  pgEnum,
   serial,
   bigint,
   integer,
@@ -10,9 +9,6 @@ import {
   timestamp,
   index,
 } from 'drizzle-orm/pg-core';
-
-/** Provenance of a word's translation (see design-doc.md §4). */
-export const wordSource = pgEnum('word_source', ['dictionary', 'fallback']);
 
 export const users = pgTable('users', {
   id: serial('id').primaryKey(),
@@ -49,7 +45,6 @@ export const words = pgTable(
     english: text('english').notNull(),
     exampleRu: text('example_ru'),
     exampleEn: text('example_en'),
-    source: wordSource('source').notNull(),
     nextReview: date('next_review').notNull(),
     intervalIndex: integer('interval_index').notNull().default(0),
     lastTested: timestamp('last_tested', { withTimezone: true }),

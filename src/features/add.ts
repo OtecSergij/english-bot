@@ -15,8 +15,8 @@ import {
   buildCardFromFallback,
   buildCardFromSense,
   withExample,
+  withManualTranslation,
   type WordCard,
-  type WordSource,
 } from '../lib/card';
 import { addDays, todayInTz } from '../lib/dates';
 import { escapeHtml } from '../lib/html';
@@ -53,18 +53,21 @@ function renderCard(
   return lines.join('\n');
 }
 
-// «🔄 Другой пример» always (the example is LLM-made). «✏️ Перевод» only for
-// fallback cards, where the translation itself is an LLM guess. A dictionary
-// translation is authoritative, so it isn't edited at add-time; homographs are
-// handled by the per-tr sense choice, and full per-word editing is a lifecycle
+// Both extra actions are offered for EVERY card: «🔄 Другой пример» (the example is
+// LLM-made) and «✍️ Свой перевод» (override the translation with your own). A
+// dictionary translation is authoritative by default, but the user can still replace
+// it explicitly (design-doc.md §4); full per-word editing later is a lifecycle
 // feature (design-doc.md §10).
-function confirmKeyboard(source: WordSource): InlineKeyboard {
+function confirmKeyboard(): InlineKeyboard {
   // One button per row — a full-width label never gets truncated («🔄 Дру…ример»).
-  const kb = new InlineKeyboard().text('💾 Сохранить', `${CONVO_ID}:save`).row();
-  kb.text('🔄 Другой пример', `${CONVO_ID}:example`).row();
-  if (source === 'fallback') kb.text('✏️ Перевод', `${CONVO_ID}:translation`).row();
-  kb.text('Отмена', `${CONVO_ID}:cancel`);
-  return kb;
+  return new InlineKeyboard()
+    .text('💾 Сохранить', `${CONVO_ID}:save`)
+    .row()
+    .text('🔄 Другой пример', `${CONVO_ID}:example`)
+    .row()
+    .text('✍️ Свой перевод', `${CONVO_ID}:translation`)
+    .row()
+    .text('Отмена', `${CONVO_ID}:cancel`);
 }
 
 function lastSegment(data: string): string {
@@ -134,6 +137,23 @@ function makeAddWordConversation(deps: AppDeps) {
 
     let card: WordCard;
 
+    // Generate an example for the CURRENT card and attach it (the LLM part). A missing
+    // example is never fatal — on error we keep the card without one. Closes over the
+    // mutable `card`, so it always uses the latest value; the optional loading text
+    // shows while the LLM runs. One definition for the three example points (first
+    // build, «Другой пример», «Свой перевод»). Replay-safe: one external() call each.
+    const regenExample = async (loadingText?: string): Promise<void> => {
+      if (loadingText) await editFlow(loadingText);
+      try {
+        const example = await conversation.external(() =>
+          deps.services.llm.generateExample(card.russian, card.english),
+        );
+        card = withExample(card, example);
+      } catch (err) {
+        await conversation.error(err);
+      }
+    };
+
     if (senses.length === 0) {
       await editFlow('Слова нет в словаре, делаю автоперевод…');
       try {
@@ -176,18 +196,9 @@ function makeAddWordConversation(deps: AppDeps) {
       }
 
       await editFlow('Собираю карточку…');
-      // Build the card first, then fill the example from it — one place computes
-      // the (russian, english) pair, shared with the regenerate path below.
+      // Build the (russian, english) pair, then fill its example via regenExample.
       card = buildCardFromSense(input, lang, sense, { ru: '', en: '' });
-      try {
-        const example = await conversation.external(() =>
-          deps.services.llm.generateExample(card.russian, card.english),
-        );
-        card = withExample(card, example);
-      } catch (err) {
-        // A missing example is not fatal — save the card without it.
-        await conversation.error(err);
-      }
+      await regenExample();
     }
 
     if (!card.russian || !card.english) {
@@ -196,7 +207,7 @@ function makeAddWordConversation(deps: AppDeps) {
     }
 
     let dup = await conversation.external(() => findWordByRussian(deps.db, userId, card.russian));
-    await editFlow(renderCard(card, dup), confirmKeyboard(card.source));
+    await editFlow(renderCard(card, dup), confirmKeyboard());
 
     for (;;) {
       const decision = await conversation.waitForCallbackQuery(
@@ -214,40 +225,31 @@ function makeAddWordConversation(deps: AppDeps) {
 
       if (action === 'example') {
         // Regenerate the example (the LLM part) — tap until it's good.
-        await editFlow('Генерирую другой пример…');
-        try {
-          const example = await conversation.external(() =>
-            deps.services.llm.generateExample(card.russian, card.english),
-          );
-          card = withExample(card, example);
-        } catch (err) {
-          await conversation.error(err);
-        }
+        await regenExample('Генерирую другой пример…');
       } else {
-        // 'translation' — only offered for fallback cards (LLM-guessed translation).
+        // 'translation' — override the translation with the user's own (any card,
+        // not just fallback). RU input → own English; EN input → own Russian prompt.
         const isRu = lang === 'ru';
         await editFlow(
-          isRu
-            ? 'Пришли исправленный перевод (англ.):'
-            : 'Пришли исправленное русское слово-подсказку:',
+          isRu ? 'Пришли свой перевод (англ.):' : 'Пришли своё русское слово-подсказку:',
         );
         const reply = await conversation.waitFor('message:text', { otherwise: dropStray });
         const text = reply.message.text.trim();
+        // The reply is consumed — delete it so only the flow message remains.
+        await reply.deleteMessage().catch(() => undefined);
         if (text && !text.startsWith('/')) {
-          if (isRu) {
-            card = { ...card, english: text };
-          } else {
-            // The Russian prompt changed → refresh the soft duplicate check.
-            card = { ...card, russian: text };
+          card = withManualTranslation(card, text, lang);
+          // EN input changed the Russian prompt → refresh the soft duplicate check.
+          if (!isRu) {
             dup = await conversation.external(() =>
               findWordByRussian(deps.db, userId, card.russian),
             );
           }
+          // The old example was for the previous translation (now cleared) → regenerate.
+          await regenExample('Генерирую пример к твоему переводу…');
         }
-        // The correction is consumed — delete it so only the flow message remains.
-        await reply.deleteMessage().catch(() => undefined);
       }
-      await editFlow(renderCard(card, dup), confirmKeyboard(card.source));
+      await editFlow(renderCard(card, dup), confirmKeyboard());
     }
 
     // Timezone comes from settings (the SRS source of truth, known_issues.md §6),

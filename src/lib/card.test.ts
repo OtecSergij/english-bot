@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCardFromFallback, buildCardFromSense, withExample } from './card';
+import {
+  buildCardFromFallback,
+  buildCardFromSense,
+  withExample,
+  withManualTranslation,
+} from './card';
 import type { DictionarySense } from '../services/dictionary/types';
 
 const example = { ru: 'Пример.', en: 'Example.' };
@@ -38,6 +43,23 @@ test('fallback (EN input): prompt = translation, answer = input', () => {
   assert.equal(card.russian, 'кварк');
   assert.equal(card.english, 'quark');
   assert.equal(card.source, 'fallback');
+});
+
+test('withManualTranslation (RU input): overrides english, drops fallback + example', () => {
+  const fb = buildCardFromFallback('кварк', 'ru', 'quark', example); // source=fallback, has example
+  const edited = withManualTranslation(fb, 'quark particle', 'ru');
+  assert.equal(edited.english, 'quark particle'); // RU input → own English answer
+  assert.equal(edited.russian, 'кварк'); // prompt unchanged
+  assert.equal(edited.source, 'dictionary'); // no longer flagged «проверь»
+  assert.equal(edited.exampleRu, null); // stale example cleared (caller regenerates)
+  assert.equal(edited.exampleEn, null);
+});
+
+test('withManualTranslation (EN input): overrides the russian prompt', () => {
+  const card = buildCardFromSense('house', 'en', { translation: 'дом' }, example);
+  const edited = withManualTranslation(card, 'жилище', 'en');
+  assert.equal(edited.russian, 'жилище'); // EN input → own Russian prompt
+  assert.equal(edited.english, 'house'); // answer unchanged
 });
 
 test('withExample replaces the example (both-or-neither), keeps the rest', () => {
