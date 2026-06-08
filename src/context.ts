@@ -5,13 +5,43 @@ import type { Conversation, ConversationFlavor } from '@grammyjs/conversations';
 export type Mode = 'idle' | 'review' | 'test';
 
 /**
- * Session holds ONLY transient flow state (current mode; the in-progress card
- * queue once flows are implemented). Deliberately in-memory: it resets on restart,
- * which is the desired behaviour for transient state. Persistent data (words,
- * settings, schedule) lives in Postgres, never here.
+ * Transient state of an in-progress review session (design-doc.md §5). We do NOT
+ * store the card queue: the next due card is recomputed from the DB each step
+ * (a graded card's `next_review` moves past today, so it leaves the due set on its
+ * own). We only need the per-session budget and the on-screen card.
+ */
+export interface ReviewState {
+  /** Session size = min(review_count, deck size), fixed at start — the `N/total`. */
+  total: number;
+  /**
+   * Word ids already graded this session. Length = cards done (step shown =
+   * `length + 1`; session ends at `total`). Also the exclude-set for the next pick,
+   * so a word never repeats within one run (review has no due filter to lean on).
+   */
+  seenIds: number[];
+  /**
+   * The card on screen awaiting a grade — guards button presses. `null` means "no
+   * card awaiting a grade" (a graded card has been consumed but the next one isn't
+   * shown yet), so a stale press can't re-grade it.
+   */
+  currentWordId: number | null;
+  /**
+   * The ONE message the whole session lives in (design-doc.md §5). Every step edits
+   * it (card → card) so the chat isn't littered, exactly like the add-word flow.
+   */
+  messageId: number;
+}
+
+/**
+ * Session holds ONLY transient flow state (current mode + in-progress review).
+ * Deliberately in-memory: it resets on restart, which is the desired behaviour for
+ * transient state. Persistent data (words, settings, schedule) lives in Postgres,
+ * never here.
  */
 export interface SessionData {
   mode: Mode;
+  /** Present only while `mode === 'review'`. */
+  review?: ReviewState;
 }
 
 /**
