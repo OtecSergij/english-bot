@@ -37,9 +37,9 @@ export function nextReviewDate(today: DateStr, index: number): DateStr {
  * by the deck size, floored at 1 so a non-empty deck always yields ≥1 card. The
  * SINGLE source of truth for the session size — used both by `startReview` (the
  * actual run) and the scheduler's reminder text, so the "N слов" shown can't drift
- * from the real session. The `max(1, …)` floor also guards a bad `review_count`
- * (0/negative) until Phase 6 validates `review_count >= 1` (to-do); centralizing it
- * here means that tightening happens in ONE place.
+ * from the real session. The `max(1, …)` floor is also defense-in-depth: settings
+ * already validate `review_count >= 1` (lib/settings), so it only guards a
+ * hand-edited/legacy row from degenerating the session — kept in ONE place.
  */
 export function reviewSessionSize(reviewCount: number, deckSize: number): number {
   return Math.max(1, Math.min(reviewCount, deckSize));

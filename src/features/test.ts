@@ -188,7 +188,8 @@ async function startTest(deps: AppDeps, ctx: MyContext): Promise<void> {
   }
 
   const today = todayInTz(new Date(now), user.timezone);
-  // max(1, …): guards a future test_count = 0 (Phase 6 settings should also validate it; to-do).
+  // Defense-in-depth: settings already validate test_count >= 1 (lib/settings), so
+  // this only guards a hand-edited/legacy row from degenerating the session.
   const limit = Math.max(1, user.testCount);
   const cards = await testWords(deps.db, user.userId, today, limit);
   if (cards.length === 0) {
