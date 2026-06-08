@@ -9,7 +9,7 @@ import {
   type MyConversationContext,
 } from '../context';
 import { addWord, findWordByRussian } from '../db/words';
-import { ensureUser } from '../db/users';
+import { ensureUser, getTimezone } from '../db/users';
 import type { AppDeps } from '../deps';
 import {
   buildCardFromFallback,
@@ -25,17 +25,29 @@ import type { DictionarySense } from '../services/dictionary/types';
 
 const CONVO_ID = 'add-word';
 
-function renderCard(card: WordCard, dup?: { russian: string; english: string } | null): string {
+/** Entry payload: the typed word plus its message id (so we can delete it on save). */
+interface AddWordSeed {
+  text: string;
+  messageId: number;
+}
+
+function renderCard(
+  card: WordCard,
+  dup?: { russian: string; english: string } | null,
+  saved = false,
+): string {
   const lines: string[] = [];
   if (dup) {
     lines.push(`⚠️ Возможно, уже есть: ${escapeHtml(dup.russian)} → ${escapeHtml(dup.english)}`);
   }
-  lines.push(`<b>${escapeHtml(card.russian)}</b> → ${escapeHtml(card.english)}`);
+  // A ✅ on the word marks the saved state (no separate "Сохранено #N" line).
+  const mark = saved ? '✅ ' : '';
+  lines.push(`${mark}<b>${escapeHtml(card.russian)}</b> → ${escapeHtml(card.english)}`);
   if (card.exampleRu && card.exampleEn) {
     lines.push('', escapeHtml(card.exampleRu), escapeHtml(card.exampleEn));
   }
   if (card.source === 'fallback') {
-    lines.push('', '⚠️ автоперевод, проверь');
+    lines.push('', '⚠️ Переведено с помощью LLM, проверь');
   }
   return lines.join('\n');
 }
@@ -46,10 +58,11 @@ function renderCard(card: WordCard, dup?: { russian: string; english: string } |
 // handled by the per-tr sense choice, and full per-word editing is a lifecycle
 // feature (design-doc.md §10).
 function confirmKeyboard(source: WordSource): InlineKeyboard {
+  // One button per row — a full-width label never gets truncated («🔄 Дру…ример»).
   const kb = new InlineKeyboard().text('💾 Сохранить', `${CONVO_ID}:save`).row();
-  kb.text('🔄 Другой пример', `${CONVO_ID}:example`);
-  if (source === 'fallback') kb.text('✏️ Перевод', `${CONVO_ID}:translation`);
-  kb.row().text('Отмена', `${CONVO_ID}:cancel`);
+  kb.text('🔄 Другой пример', `${CONVO_ID}:example`).row();
+  if (source === 'fallback') kb.text('✏️ Перевод', `${CONVO_ID}:translation`).row();
+  kb.text('Отмена', `${CONVO_ID}:cancel`);
   return kb;
 }
 
@@ -67,12 +80,14 @@ function makeAddWordConversation(deps: AppDeps) {
   return async function addWordConversation(
     conversation: MyConversation,
     ctx: MyConversationContext,
-    seed?: string,
+    seed?: AddWordSeed,
   ): Promise<void> {
     const chatId = ctx.chat?.id;
     if (chatId === undefined) return;
 
-    const input = (seed ?? '').trim();
+    const input = (seed?.text ?? '').trim();
+    // The user's original word message — deleted once the word is saved (to-do §UX).
+    const userMessageId = seed?.messageId;
     if (!input) {
       await ctx.reply('Пришли слово (рус/англ), чтобы добавить его в словарь.');
       return;
@@ -90,6 +105,15 @@ function makeAddWordConversation(deps: AppDeps) {
           reply_markup: keyboard,
         })
         .catch(() => undefined);
+
+    // Cancel wipes the flow entirely — delete the flow message and the user's word
+    // message, leaving no trace (no lingering «Отменено»; to-do §UX).
+    const cancelFlow = async (): Promise<void> => {
+      await ctx.api.deleteMessage(chatId, flow.message_id).catch(() => undefined);
+      if (userMessageId !== undefined) {
+        await ctx.api.deleteMessage(chatId, userMessageId).catch(() => undefined);
+      }
+    };
 
     const userId = await conversation.external(() => ensureUser(deps.db, chatId, config.ownerTz));
 
@@ -141,7 +165,7 @@ function makeAddWordConversation(deps: AppDeps) {
         );
         await pick.answerCallbackQuery();
         if (lastSegment(pick.callbackQuery.data) === 'cancel') {
-          await editFlow('Отменено.');
+          await cancelFlow();
           return;
         }
         sense = senses[Number(lastSegment(pick.callbackQuery.data))] ?? senses[0]!;
@@ -178,7 +202,7 @@ function makeAddWordConversation(deps: AppDeps) {
       const action = lastSegment(decision.callbackQuery.data);
 
       if (action === 'cancel') {
-        await editFlow('Отменено.');
+        await cancelFlow();
         return;
       }
       if (action === 'save') break;
@@ -217,11 +241,19 @@ function makeAddWordConversation(deps: AppDeps) {
       await editFlow(renderCard(card, dup), confirmKeyboard(card.source));
     }
 
-    const today = todayInTz(new Date(await conversation.now()), config.ownerTz);
+    // Timezone comes from settings (the SRS source of truth, known_issues.md §6),
+    // so add and review compute "today" the same way once TZ is editable (Phase 6).
+    // Read by the userId we already hold (no second user lookup).
+    const tz = (await conversation.external(() => getTimezone(deps.db, userId))) ?? config.ownerTz;
+    const today = todayInTz(new Date(await conversation.now()), tz);
     const nextReview = addDays(today, 1);
     try {
-      const id = await conversation.external(() => addWord(deps.db, userId, card, nextReview));
-      await editFlow(`✅ Сохранено (#${id})\n\n${renderCard(card)}`);
+      await conversation.external(() => addWord(deps.db, userId, card, nextReview));
+      await editFlow(renderCard(card, null, true));
+      // Saved → drop the user's original word message so only the ✅ card remains.
+      if (userMessageId !== undefined) {
+        await ctx.api.deleteMessage(chatId, userMessageId).catch(() => undefined);
+      }
     } catch (err) {
       await conversation.error(err);
       await editFlow('Не удалось сохранить слово. Попробуй позже.');
@@ -237,7 +269,8 @@ export function createAddFeature(deps: AppDeps): Composer<MyContext> {
   );
 
   feature.filter(freeTextIn('idle')).on('message:text', async (ctx) => {
-    await ctx.conversation.enter(CONVO_ID, ctx.message.text);
+    const seed: AddWordSeed = { text: ctx.message.text, messageId: ctx.message.message_id };
+    await ctx.conversation.enter(CONVO_ID, seed);
   });
 
   return feature;

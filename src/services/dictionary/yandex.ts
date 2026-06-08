@@ -3,6 +3,8 @@ import type { DictionaryProvider, DictionaryResult, DictionarySense } from './ty
 
 const LOOKUP_URL = 'https://dictionary.yandex.net/api/v1/dicservice.json/lookup';
 const TIMEOUT_MS = 8_000;
+/** Yandex `flags` bit for morphological search (match inflected forms via the lemma). */
+const MORPHO_FLAG = 4;
 /** Cap on the number of meaning-choices we show. */
 const MAX_SENSES = 6;
 /** Minimum Yandex relevance (`fr`) to keep a meaning; below this is long-tail noise. */
@@ -72,19 +74,32 @@ export function mapYandexResponse(
 
 /**
  * Yandex Dictionary provider (design-doc.md §2, §4). Plain GET, key in the query
- * string. An empty `def[]` (no error) means "not found" → caller falls back to
- * the LLM. No MORPHO flag: it surfaces spurious cross-lemma matches (e.g. «крыло»
- * → verb «крыть» = cover, «дом» → adverb «дома» = at home); we look up the form
- * the user typed.
+ * string. An empty `def[]` (no error) means "not found".
+ *
+ * Two-stage lookup. First the EXACT form the user typed (no flags) — dictionary
+ * forms (дом, крыло) get clean sense lists. Only if that's empty do we retry with
+ * MORPHO (morphological search), which rescues inflected forms (продолжаем →
+ * продолжать → continue, идём → идти → go) before the caller gives up to the LLM.
+ * MORPHO is the fallback, not the default, because it pollutes exact matches with
+ * spurious cross-lemma senses (крыло → «крыть»=cover, дом → adverb «дома»=at home);
+ * trying the exact form first avoids that for words that are already lemmas.
  */
 export class YandexDictionary implements DictionaryProvider {
   constructor(private readonly apiKey: string) {}
 
   async lookup(word: string, direction: Direction): Promise<DictionaryResult> {
+    const exact = await this.request(word, direction, 0);
+    if (exact.senses.length > 0) return exact;
+    // Not found as typed — retry by lemma (e.g. an inflected verb/noun form).
+    return this.request(word, direction, MORPHO_FLAG);
+  }
+
+  private async request(word: string, direction: Direction, flags: number): Promise<DictionaryResult> {
     const url = new URL(LOOKUP_URL);
     url.searchParams.set('key', this.apiKey);
     url.searchParams.set('lang', direction);
     url.searchParams.set('text', word);
+    if (flags) url.searchParams.set('flags', String(flags));
 
     let raw: YandexLookupResponse;
     try {
