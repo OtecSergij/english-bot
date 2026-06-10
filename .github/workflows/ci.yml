@@ -64,4 +64,6 @@ jobs:
       - name: Trigger Coolify deploy
         # Skipped (not failed) until the Coolify webhook secrets are wired up.
         if: env.COOLIFY_DEPLOY_URL != ''
-        run: curl --fail-with-body -H "Authorization: Bearer $COOLIFY_TOKEN" "$COOLIFY_DEPLOY_URL"
+        # Block scalar: a plain `run:` value can't hold the ": " inside the header.
+        run: |
+          curl --fail-with-body -H "Authorization: Bearer $COOLIFY_TOKEN" "$COOLIFY_DEPLOY_URL"
