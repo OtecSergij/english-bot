@@ -14,6 +14,15 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Dummy env: config.ts validates the full env fail-fast AT IMPORT (right for
+    # prod boot), and the feature test files transitively import it. Unit tests
+    # never read these values — config just has to parse. Locally .env covers this.
+    env:
+      BOT_TOKEN: ci-dummy
+      YANDEX_DICT_KEY: ci-dummy
+      GROQ_API_KEY: ci-dummy
+      DATABASE_URL: postgres://ci:ci@localhost:5432/ci
+      OWNER_CHAT_ID: "1"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v6
