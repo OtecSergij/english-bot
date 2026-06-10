@@ -1,0 +1,11 @@
+# Keep the build context to what the Dockerfile actually COPYies
+# (package files, src/, tsconfig/tsup configs, drizzle/, docker-entrypoint.sh).
+node_modules
+dist
+.git
+.github
+.env*
+*.log
+*.md
+.DS_Store
+.claude

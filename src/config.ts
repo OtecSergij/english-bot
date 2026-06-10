@@ -14,6 +14,16 @@ function requiredInt(name: string): number {
   return n;
 }
 
+function optionalInt(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (!value) return fallback;
+  const n = Number(value);
+  if (!Number.isInteger(n)) {
+    throw new Error(`Env var ${name} must be an integer, got: ${value}`);
+  }
+  return n;
+}
+
 function optionalTz(name: string, fallback: string): string {
   const value = process.env[name];
   if (!value) return fallback;
@@ -57,4 +67,6 @@ export const config = {
   ownerChatId: requiredInt('OWNER_CHAT_ID'),
   // Owner timezone for SRS dates; temporary single-user solution (known_issues.md §6).
   ownerTz: optionalTz('OWNER_TZ', 'UTC'),
+  // Localhost liveness endpoint for the container healthcheck (src/health.ts).
+  healthPort: optionalInt('HEALTH_PORT', 8080),
 } as const;
