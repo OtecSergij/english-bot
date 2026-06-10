@@ -5,29 +5,8 @@
     {
       "idx": 0,
       "version": "7",
-      "when": 1780773801155,
-      "tag": "0000_broken_baron_zemo",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "7",
-      "when": 1780855026642,
-      "tag": "0001_natural_forgotten_one",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "7",
-      "when": 1780935711303,
-      "tag": "0002_lean_felicia_hardy",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "7",
-      "when": 1780944186459,
-      "tag": "0003_mature_the_enforcers",
+      "when": 1781113667009,
+      "tag": "0000_chilly_blue_marvel",
       "breakpoints": true
     }
   ]

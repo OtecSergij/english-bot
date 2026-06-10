@@ -1,4 +1,3 @@
-CREATE TYPE "public"."word_source" AS ENUM('dictionary', 'fallback');--> statement-breakpoint
 CREATE TABLE "settings" (
 	"user_id" integer PRIMARY KEY NOT NULL,
 	"review_count" integer DEFAULT 10 NOT NULL,
@@ -11,6 +10,7 @@ CREATE TABLE "users" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"tg_chat_id" bigint NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"last_reviewed_on" date,
 	CONSTRAINT "users_tg_chat_id_unique" UNIQUE("tg_chat_id")
 );
 --> statement-breakpoint
@@ -18,10 +18,9 @@ CREATE TABLE "words" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"user_id" integer NOT NULL,
 	"russian" text NOT NULL,
-	"english" text[] NOT NULL,
+	"english" text NOT NULL,
 	"example_ru" text,
 	"example_en" text,
-	"source" "word_source" NOT NULL,
 	"next_review" date NOT NULL,
 	"interval_index" integer DEFAULT 0 NOT NULL,
 	"last_tested" timestamp with time zone,

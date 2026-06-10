@@ -1,5 +1,5 @@
 {
-  "id": "c0a94503-0737-4fe7-8dde-1e91ced1395e",
+  "id": "14582683-3566-4bdb-826d-a10cb83c7080",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -87,6 +87,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "last_reviewed_on": {
+          "name": "last_reviewed_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -129,7 +135,7 @@
         },
         "english": {
           "name": "english",
-          "type": "text[]",
+          "type": "text",
           "primaryKey": false,
           "notNull": true
         },
@@ -144,13 +150,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "source": {
-          "name": "source",
-          "type": "word_source",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true
         },
         "next_review": {
           "name": "next_review",
@@ -245,16 +244,7 @@
       "isRLSEnabled": false
     }
   },
-  "enums": {
-    "public.word_source": {
-      "name": "word_source",
-      "schema": "public",
-      "values": [
-        "dictionary",
-        "fallback"
-      ]
-    }
-  },
+  "enums": {},
   "schemas": {},
   "sequences": {},
   "roles": {},
