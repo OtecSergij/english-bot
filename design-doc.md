@@ -39,6 +39,19 @@
 - **Надёжность процесса:** `bot.catch` для контролируемого лога ошибок (стабы
   кидают `not implemented`), `pool.on('error')` на пуле PG, graceful shutdown по
   SIGINT/SIGTERM (`bot.stop()` + `pool.end()` + остановка cron).
+- **Прод-деплой: Docker-образ + long polling (решено).** Образ собирается в GitHub
+  CI → GHCR (private) → Coolify на VPS тянет его и перезапускает по деплой-вебхуку
+  (конвенции — `infra/deploy-playbook.md`). **Telegram-вебхук НЕ используем**: при
+  одном пользователе long polling даёт нулевую входящую поверхность — боту не нужны
+  ни домен, ни DNS, ни открытый порт вообще; пересмотреть при мультиюзере. Сборка —
+  tsup-бандл СВОЕГО кода (ESM с extensionless-импортами не запускается из голого
+  tsc-emit), зависимости — внешние, в образе как pruned `node_modules` (полный бандл
+  ломал рантайм-инварианты deps; см. tsup.config.ts). **Миграции применяются на
+  старте контейнера** (программный мигратор drizzle-orm, `src/migrate.ts`,
+  fail-fast в entrypoint) — бот не стартует на неприменённой схеме. Liveness —
+  `/healthz` на localhost (`src/health.ts`) под Docker HEALTHCHECK: 200 только
+  когда поллинг реально запущен. Non-root (`node`), `exec` в entrypoint → PID 1 =
+  node, SIGTERM доходит до graceful shutdown.
 
 ## 3. Принцип использования LLM
 

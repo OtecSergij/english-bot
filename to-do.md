@@ -37,10 +37,29 @@
   пример или не тот смысл, замеченные ПОСЛЕ сохранения). На добавлении неверный
   перевод уже правится кнопкой «Свой перевод».
 
-## Прод / деплой (делается отдельно)
+## Прод / деплой
 
-- Build для прода (tsup/tsc) + процесс-менеджер; webhook vs long-polling при деплое.
-- Деплой (хостинг + БД), бэкапы. Повторить провижининг с боевыми кредами и БД.
+Код-часть готова (design-doc §2 «Прод-деплой»): tsup-бандл своего кода + внешние
+deps (`tsup.config.ts`), multi-stage `Dockerfile` (node:22-slim, non-root, exec →
+PID 1 = node, HEALTHCHECK), стартовые миграции (`src/migrate.ts`, fail-fast в
+entrypoint), `/healthz` (`src/health.ts`), CI (`.github/workflows/ci.yml`: checks →
+GHCR → деплой-вебхук Coolify), `.nvmrc`. Long polling (без Telegram-вебхука /
+домена / портов — решено: наши хендлеры легитимно долгие (LLM до 20с), вебхук-модель
+ретраила бы апдейты → дубли). Миграции **сквошены в один baseline** перед первым
+прод-деплоем (по плейбуку; прод стартует с чистой БД). Контейнер проверен локально
+end-to-end (миграции, поллинг, graceful stop). Локальное окружение выведено из
+эксплуатации: бот остановлен (токен освобождён под прод), БД очищена и остановлена.
+
+Осталось (вне кода, по `infra/deploy-playbook.md`):
+- [ ] Coolify: Destination-сеть `english-bot` → managed Postgres 18 (internal) →
+      бэкапы БД → app (Docker Image из GHCR, та же сеть, env-секреты,
+      «Consistent Container Names» — без rolling, чтобы два поллера не пересеклись).
+- [ ] GHCR: после первого CI-пуша проверить, что пакет private (репо публичное!).
+- [ ] CI-секреты: `COOLIFY_DEPLOY_URL` (deploy-вебхук с uuid) + `COOLIFY_TOKEN`.
+- [ ] Для будущей локальной разработки: ВТОРОЙ бот у BotFather (один токен = один
+      поллер; локальный и прод конфликтуют 409-ми) + `docker start english-bot-pg`
+      и `npm run db:migrate` (локальная БД пуста).
+- [ ] Запись в `infra/deploy-playbook.md` «Deployed projects» после верификации.
 
 ## Бэклог (отложено по решению)
 
