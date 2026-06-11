@@ -62,27 +62,29 @@ test('testComplete is true only when the queue is empty', () => {
   assert.equal(testComplete([]), true);
 });
 
-test('renderQuestion shows the counter and prompt, no note by default', () => {
-  assert.equal(renderQuestion(0, 10, 'дом'), '0/10\n\n<b>дом</b>\nНапиши перевод на английский:');
+test('renderQuestion counts 1-based: first card is 1/N, last is N/N', () => {
+  // done = cards CLOSED so far; the counter shows the position being closed (§6).
+  assert.equal(renderQuestion(0, 10, 'дом'), '1/10\n\n<b>дом</b>\nНапиши перевод на английский:');
+  assert.match(renderQuestion(9, 10, 'дом'), /^10\/10\n/);
 });
 
 test('renderQuestion inserts a ⚠️ note above the prompt', () => {
   assert.equal(
     renderQuestion(0, 10, 'кот', '⚠️ Отвечай на английском.'),
-    '0/10\n\n⚠️ Отвечай на английском.\n\n<b>кот</b>\nНапиши перевод на английский:',
+    '1/10\n\n⚠️ Отвечай на английском.\n\n<b>кот</b>\nНапиши перевод на английский:',
   );
 });
 
 test('renderQuestion escapes HTML in the prompt', () => {
-  assert.equal(renderQuestion(0, 1, 'a<b'), '0/1\n\n<b>a&lt;b</b>\nНапиши перевод на английский:');
+  assert.equal(renderQuestion(0, 1, 'a<b'), '1/1\n\n<b>a&lt;b</b>\nНапиши перевод на английский:');
 });
 
 const card = (id: number, russian: string, english: string): TestCard => ({ id, russian, english });
 
-test('renderResult shows the counter and the result line', () => {
+test('renderResult shows the same 1-based counter as its question', () => {
   assert.equal(
     renderResult(2, 10, '❌ Не правильно. «идти» — «walk»'),
-    '2/10\n\n❌ Не правильно. «идти» — «walk»',
+    '3/10\n\n❌ Не правильно. «идти» — «walk»',
   );
 });
 

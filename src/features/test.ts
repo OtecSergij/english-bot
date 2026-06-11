@@ -48,9 +48,15 @@ export function testComplete(queue: number[]): boolean {
 }
 
 /**
- * A test question (design-doc.md §6): `done/total`, an optional ⚠️ note (e.g. wrong
+ * A test question (design-doc.md §6): the counter, an optional ⚠️ note (e.g. wrong
  * input language), then the Russian prompt. The answer is NOT shown here — it's
  * revealed in place after an answer/«Показать ответ» (see `renderResult`).
+ *
+ * The counter is `done + 1` — the 1-based position of the card being CLOSED, same
+ * visual language as review (§5): 1/3 … 3/3. `done + 1` never exceeds `total` (a
+ * question only renders while the queue is non-empty, so done ≤ total − 1). After a
+ * wrong answer the number repeats on the re-ask — honest: that card is still being
+ * closed, the cycle just brought it back.
  */
 export function renderQuestion(
   done: number,
@@ -58,15 +64,15 @@ export function renderQuestion(
   russian: string,
   note?: string,
 ): string {
-  const lines = [`${done}/${total}`];
+  const lines = [`${done + 1}/${total}`];
   if (note) lines.push('', note);
   lines.push('', `<b>${escapeHtml(russian)}</b>`, 'Напиши перевод на английский:');
   return lines.join('\n');
 }
 
-/** The in-place result screen shown after an answer / reveal, with a «Дальше» button. */
+/** The in-place result screen shown after an answer / reveal, with a «Дальше» button (same 1-based counter as its question). */
 export function renderResult(done: number, total: number, line: string): string {
-  return `${done}/${total}\n\n${line}`;
+  return `${done + 1}/${total}\n\n${line}`;
 }
 
 /** End-of-session summary — kept in the chat as the test result (to-do §UX). */
