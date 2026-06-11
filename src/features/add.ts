@@ -230,9 +230,7 @@ function makeAddWordConversation(deps: AppDeps) {
         // 'translation' — override the translation with the user's own (any card,
         // not just fallback). RU input → own English; EN input → own Russian prompt.
         const isRu = lang === 'ru';
-        await editFlow(
-          isRu ? 'Пришли свой перевод (англ.):' : 'Пришли своё русское слово-подсказку:',
-        );
+        await editFlow(isRu ? 'Пришли свой перевод (англ.):' : 'Пришли свой перевод (рус.)');
         const reply = await conversation.waitFor('message:text', { otherwise: dropStray });
         const text = reply.message.text.trim();
         // The reply is consumed — delete it so only the flow message remains.
