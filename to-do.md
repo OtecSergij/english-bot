@@ -50,16 +50,16 @@ GHCR → деплой-вебхук Coolify), `.nvmrc`. Long polling (без Tele
 end-to-end (миграции, поллинг, graceful stop). Локальное окружение выведено из
 эксплуатации: бот остановлен (токен освобождён под прод), БД очищена и остановлена.
 
-Осталось (вне кода, по `infra/deploy-playbook.md`):
-- [ ] Coolify: Destination-сеть `english-bot` → managed Postgres 18 (internal) →
-      бэкапы БД → app (Docker Image из GHCR, та же сеть, env-секреты,
-      «Consistent Container Names» — без rolling, чтобы два поллера не пересеклись).
-- [ ] GHCR: после первого CI-пуша проверить, что пакет private (репо публичное!).
-- [ ] CI-секреты: `COOLIFY_DEPLOY_URL` (deploy-вебхук с uuid) + `COOLIFY_TOKEN`.
+**Задеплоено: LIVE с 2026-06-11**, автодеплой по пушу в `main` работает сквозняком
+(CI → GHCR → Coolify-вебхук). Запись проекта — `infra/deploy-playbook.md`.
+- [x] Coolify: сеть `english-bot`, managed Postgres 18 (internal), app из GHCR
+      (полный путь `ghcr.io/...`!), Consistent Container Names ON, Domains пуст.
+- [x] GHCR-пакет переведён в private (репо публичное).
+- [x] CI-секреты `COOLIFY_DEPLOY_URL` + `COOLIFY_TOKEN` (отдельный deploy-токен).
+- [x] Запись в `infra/deploy-playbook.md` «Deployed projects».
 - [ ] Для будущей локальной разработки: ВТОРОЙ бот у BotFather (один токен = один
       поллер; локальный и прод конфликтуют 409-ми) + `docker start english-bot-pg`
       и `npm run db:migrate` (локальная БД пуста).
-- [ ] Запись в `infra/deploy-playbook.md` «Deployed projects» после верификации.
 
 ## Бэклог (отложено по решению)
 
