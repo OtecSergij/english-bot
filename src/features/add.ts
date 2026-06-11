@@ -47,7 +47,10 @@ function renderCard(
   if (card.exampleRu && card.exampleEn) {
     lines.push('', escapeHtml(card.exampleRu), escapeHtml(card.exampleEn));
   }
-  if (card.source === 'fallback') {
+  // The «проверь» nudge is PRE-save only (design-doc.md §4): pressing «Сохранить»
+  // IS the confirmation, so the saved ✅-card — the message that stays in the chat —
+  // drops the warning.
+  if (card.source === 'fallback' && !saved) {
     lines.push('', '⚠️ Переведено с помощью LLM, проверь');
   }
   return lines.join('\n');
