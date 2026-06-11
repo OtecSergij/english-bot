@@ -11,6 +11,12 @@ const exampleSchema = z.object({
   en: z.string().describe('Its English translation.'),
 });
 
+const translationSchema = z.object({
+  // min(1): an empty translation must fail validation (and be retried/thrown),
+  // not silently wipe the card's example via the both-or-neither rule.
+  en: z.string().min(1).describe('The English translation of the sentence.'),
+});
+
 const fallbackSchema = z.object({
   translation: z.string().describe('The translation — a single word or short phrase.'),
   example: z.object({
@@ -49,6 +55,23 @@ export class AiSdkLlm implements LlmProvider {
       abortSignal: AbortSignal.timeout(TIMEOUT_MS),
     });
     return object;
+  }
+
+  async translateExample(exampleRu: string, russian: string, english: string): Promise<string> {
+    const { object } = await generateObject({
+      model: this.model,
+      schema: translationSchema,
+      schemaName: 'translation',
+      system:
+        'You are a precise Russian→English translator for a vocabulary-learning app. ' +
+        'Translate naturally, but keep the required vocabulary word.',
+      prompt:
+        `Translate this Russian sentence into English:\n"${exampleRu}"\n` +
+        `The sentence is an example for the vocabulary pair "${russian}" → "${english}". ` +
+        `The translation MUST use the word "${english}" (do not paraphrase it away).`,
+      abortSignal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    return object.en;
   }
 
   async fallbackTranslate(word: string, direction: Direction): Promise<FallbackTranslation> {

@@ -19,6 +19,13 @@ export interface LlmProvider {
    * translation containing the English word (design-doc.md §4).
    */
   generateExample(russian: string, english: string): Promise<Example>;
+  /**
+   * Translate a USER-provided Russian example sentence (design-doc.md §4 «Свой
+   * пример»). Constrained translation, not free generation: the result MUST use
+   * `english` as the rendering of `russian` — a generic MT would be free to
+   * paraphrase the very vocabulary word away, which defeats the card.
+   */
+  translateExample(exampleRu: string, russian: string, english: string): Promise<string>;
   /** Rare-word fallback: translation + example in one call (source=fallback). */
   fallbackTranslate(word: string, direction: Direction): Promise<FallbackTranslation>;
 }

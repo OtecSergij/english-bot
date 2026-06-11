@@ -53,19 +53,22 @@ function renderCard(
   return lines.join('\n');
 }
 
-// Both extra actions are offered for EVERY card: «🔄 Другой пример» (the example is
-// LLM-made) and «✍️ Свой перевод» (override the translation with your own). A
-// dictionary translation is authoritative by default, but the user can still replace
-// it explicitly (design-doc.md §4); full per-word editing later is a lifecycle
+// The extra actions are offered for EVERY card: «🔄 Другой пример» (regenerate the
+// LLM example), «✍️ Свой перевод» (override the translation) and «📝 Свой пример»
+// (your own Russian sentence; its English half is a CONSTRAINED LLM translation —
+// design-doc.md §4). A dictionary translation is authoritative by default, but the
+// user can still replace it explicitly; full per-word editing later is a lifecycle
 // feature (design-doc.md §10).
 function confirmKeyboard(): InlineKeyboard {
-  // One button per row — a full-width label never gets truncated («🔄 Дру…ример»).
+  // One action per row, except the two short «Свой …» overrides sharing one (a
+  // full-width label never gets truncated — «🔄 Дру…ример»).
   return new InlineKeyboard()
     .text('💾 Сохранить', `${CONVO_ID}:save`)
     .row()
     .text('🔄 Другой пример', `${CONVO_ID}:example`)
     .row()
     .text('✍️ Свой перевод', `${CONVO_ID}:translation`)
+    .text('📝 Свой пример', `${CONVO_ID}:myexample`)
     .row()
     .text('Отмена', `${CONVO_ID}:cancel`);
 }
@@ -211,7 +214,7 @@ function makeAddWordConversation(deps: AppDeps) {
 
     for (;;) {
       const decision = await conversation.waitForCallbackQuery(
-        new RegExp(`^${CONVO_ID}:(save|example|translation|cancel)$`),
+        new RegExp(`^${CONVO_ID}:(save|example|translation|myexample|cancel)$`),
         { otherwise: dropStray },
       );
       await decision.answerCallbackQuery();
@@ -226,9 +229,9 @@ function makeAddWordConversation(deps: AppDeps) {
       if (action === 'example') {
         // Regenerate the example (the LLM part) — tap until it's good.
         await regenExample('Генерирую другой пример…');
-      } else {
-        // 'translation' — override the translation with the user's own (any card,
-        // not just fallback). RU input → own English; EN input → own Russian prompt.
+      } else if (action === 'translation') {
+        // Override the translation with the user's own (any card, not just
+        // fallback). RU input → own English; EN input → own Russian prompt.
         const isRu = lang === 'ru';
         await editFlow(isRu ? 'Пришли свой перевод (англ.):' : 'Пришли свой перевод (рус.)');
         const reply = await conversation.waitFor('message:text', { otherwise: dropStray });
@@ -245,6 +248,29 @@ function makeAddWordConversation(deps: AppDeps) {
           }
           // The old example was for the previous translation (now cleared) → regenerate.
           await regenExample('Генерирую пример к твоему переводу…');
+        }
+      } else {
+        // 'myexample' — the user supplies the Russian example sentence; its English
+        // half is a CONSTRAINED LLM translation that must keep `card.english`
+        // (a free MT could paraphrase the vocabulary word away — design-doc.md §4).
+        // The sentence isn't validated to contain `card.russian`: inflection makes
+        // substring checks wrong («шёл» for «идти»), and it's the user's own card.
+        await editFlow('Пришли свой пример (рус.):');
+        const reply = await conversation.waitFor('message:text', { otherwise: dropStray });
+        const text = reply.message.text.trim();
+        await reply.deleteMessage().catch(() => undefined);
+        if (text && !text.startsWith('/')) {
+          await editFlow('Перевожу твой пример…');
+          try {
+            const en = await conversation.external(() =>
+              deps.services.llm.translateExample(text, card.russian, card.english),
+            );
+            card = withExample(card, { ru: text, en });
+          } catch (err) {
+            // Translation failed — keep the previous example untouched (same
+            // semantics as a failed «Другой пример» regeneration).
+            await conversation.error(err);
+          }
         }
       }
       await editFlow(renderCard(card, dup), confirmKeyboard());
