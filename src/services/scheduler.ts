@@ -81,12 +81,21 @@ export function startScheduler(bot: Bot<MyContext>, db: DB): () => void {
           const today = todayInTz(now, c.timezone);
           const nowHHMM = timeInTz(now, c.timezone);
           const reviewHHMM = hhmm(c.reviewTime); // 'HH:MM:SS' → 'HH:MM'
+          const due = isReminderDue({ nowHHMM, reviewHHMM, lastReviewedOn: c.lastReviewedOn, today });
+          // TEMP diagnostic (to-do «плановое не стартует»): one line per tick per user
+          // so prod logs reveal whether the tick runs at all and what it decides. Trim
+          // to the events below once the cause is confirmed.
+          console.log(
+            `Scheduler tick: user=${c.userId} tz=${c.timezone} now=${nowHHMM} review=${reviewHHMM} today=${today} last=${c.lastReviewedOn} due=${due}`,
+          );
           // Cheap gate first (no DB): skips ~every tick (wrong time / already sent
           // today) before we ever round-trip the deck count.
-          if (!isReminderDue({ nowHHMM, reviewHHMM, lastReviewedOn: c.lastReviewedOn, today }))
-            continue;
+          if (!due) continue;
           const deckSize = await countWords(db, c.userId);
-          if (deckSize <= 0) continue; // nothing in the deck — don't nag
+          if (deckSize <= 0) {
+            console.log(`Scheduler: user ${c.userId} review due but deck is empty`);
+            continue; // nothing in the deck — don't nag
+          }
 
           // Session size the user will actually go through (shared rule with
           // startReview, so the shown count can't drift from the real run — lib/srs).
@@ -98,6 +107,7 @@ export function startScheduler(bot: Bot<MyContext>, db: DB): () => void {
           // which is far better than stamping first and silently skipping the day if
           // the send fails.
           await markReviewedToday(db, c.userId, today);
+          console.log(`Scheduler: daily reminder sent to user ${c.userId} (${n} words)`);
         } catch (err) {
           console.error(`Scheduler: daily review failed for user ${c.userId}:`, err);
         }
@@ -110,6 +120,7 @@ export function startScheduler(bot: Bot<MyContext>, db: DB): () => void {
   };
 
   const task = cron.schedule('* * * * *', () => void tick());
+  console.log('Scheduler started: daily review check every minute');
   return () => {
     task.stop();
   };
