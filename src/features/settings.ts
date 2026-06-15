@@ -45,7 +45,7 @@ export function renderMain(
     `⏰ Время повторения: <b>${hhmm(s.reviewTime)}</b>`,
     `✍️ Слов на тест: <b>${effectiveTestCount(s.testCount)}</b>`,
     '',
-    `🌍 Таймзона: ${escapeHtml(s.timezone)} · через env`,
+    `🌍 Таймзона: ${escapeHtml(s.timezone)}`,
   ].join('\n');
 }
 
@@ -129,7 +129,8 @@ async function editPanel(ctx: Context, text: string, keyboard: InlineKeyboard): 
 async function loadOrToast(deps: AppDeps, ctx: MyContext): Promise<UserContext | null> {
   const chatId = ctx.chat?.id;
   const s = chatId === undefined ? null : await getUserContext(deps.db, chatId);
-  if (!s) await ctx.answerCallbackQuery({ text: 'Настройки недоступны — открой /settings заново.' });
+  if (!s)
+    await ctx.answerCallbackQuery({ text: 'Настройки недоступны — открой /settings заново.' });
   return s;
 }
 
@@ -157,7 +158,11 @@ async function showTestCount(deps: AppDeps, ctx: MyContext): Promise<void> {
   const s = await loadOrToast(deps, ctx);
   if (!s) return;
   await ctx.answerCallbackQuery();
-  await editPanel(ctx, renderTestCountEditor(effectiveTestCount(s.testCount)), stepperKeyboard('tc'));
+  await editPanel(
+    ctx,
+    renderTestCountEditor(effectiveTestCount(s.testCount)),
+    stepperKeyboard('tc'),
+  );
 }
 
 async function showTime(deps: AppDeps, ctx: MyContext): Promise<void> {
@@ -165,7 +170,11 @@ async function showTime(deps: AppDeps, ctx: MyContext): Promise<void> {
   if (!s) return;
   await ctx.answerCallbackQuery();
   // The hour is the first two chars of 'HH:MM:SS' (distinct from the HH:MM truncation).
-  await editPanel(ctx, renderTimePicker(s.reviewTime, s.timezone), timeKeyboard(Number(s.reviewTime.slice(0, 2))));
+  await editPanel(
+    ctx,
+    renderTimePicker(s.reviewTime, s.timezone),
+    timeKeyboard(Number(s.reviewTime.slice(0, 2))),
+  );
 }
 
 async function stepReviewCount(deps: AppDeps, ctx: MyContext, delta: number): Promise<void> {
@@ -196,7 +205,8 @@ async function setTime(deps: AppDeps, ctx: MyContext, hour: number): Promise<voi
   const s = await loadOrToast(deps, ctx);
   if (!s) return;
   const hh = String(clampInt(hour, 0, 23)).padStart(2, '0');
-  if (`${hh}:00:00` !== s.reviewTime) await updateSettings(deps.db, s.userId, { reviewTime: `${hh}:00` });
+  if (`${hh}:00:00` !== s.reviewTime)
+    await updateSettings(deps.db, s.userId, { reviewTime: `${hh}:00` });
   const deck = await countWords(deps.db, s.userId);
   await ctx.answerCallbackQuery();
   // A time pick is a single decisive choice → back to the overview (patch locally to
@@ -227,8 +237,12 @@ export function createSettingsFeature(deps: AppDeps): Composer<MyContext> {
   feature.callbackQuery('set:nav:rc', (ctx) => showReviewCount(deps, ctx));
   feature.callbackQuery('set:nav:tc', (ctx) => showTestCount(deps, ctx));
   feature.callbackQuery('set:nav:time', (ctx) => showTime(deps, ctx));
-  feature.callbackQuery(/^set:rc:(-?\d+)$/, (ctx) => stepReviewCount(deps, ctx, Number(ctx.match[1])));
-  feature.callbackQuery(/^set:tc:(-?\d+)$/, (ctx) => stepTestCount(deps, ctx, Number(ctx.match[1])));
+  feature.callbackQuery(/^set:rc:(-?\d+)$/, (ctx) =>
+    stepReviewCount(deps, ctx, Number(ctx.match[1])),
+  );
+  feature.callbackQuery(/^set:tc:(-?\d+)$/, (ctx) =>
+    stepTestCount(deps, ctx, Number(ctx.match[1])),
+  );
   feature.callbackQuery(/^set:time:(\d+)$/, (ctx) => setTime(deps, ctx, Number(ctx.match[1])));
   feature.callbackQuery('set:close', async (ctx) => {
     await ctx.answerCallbackQuery();
