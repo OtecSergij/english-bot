@@ -81,16 +81,10 @@ export function startScheduler(bot: Bot<MyContext>, db: DB): () => void {
           const today = todayInTz(now, c.timezone);
           const nowHHMM = timeInTz(now, c.timezone);
           const reviewHHMM = hhmm(c.reviewTime); // 'HH:MM:SS' → 'HH:MM'
-          const due = isReminderDue({ nowHHMM, reviewHHMM, lastReviewedOn: c.lastReviewedOn, today });
-          // TEMP diagnostic (to-do «плановое не стартует»): one line per tick per user
-          // so prod logs reveal whether the tick runs at all and what it decides. Trim
-          // to the events below once the cause is confirmed.
-          console.log(
-            `Scheduler tick: user=${c.userId} tz=${c.timezone} now=${nowHHMM} review=${reviewHHMM} today=${today} last=${c.lastReviewedOn} due=${due}`,
-          );
           // Cheap gate first (no DB): skips ~every tick (wrong time / already sent
           // today) before we ever round-trip the deck count.
-          if (!due) continue;
+          if (!isReminderDue({ nowHHMM, reviewHHMM, lastReviewedOn: c.lastReviewedOn, today }))
+            continue;
           const deckSize = await countWords(db, c.userId);
           if (deckSize <= 0) {
             console.log(`Scheduler: user ${c.userId} review due but deck is empty`);
