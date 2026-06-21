@@ -12,7 +12,6 @@ import type { AppDeps } from './deps';
 import { createAddFeature } from './features/add';
 import { createReviewFeature } from './features/review';
 import { createSettingsFeature } from './features/settings';
-import { createTestFeature } from './features/test';
 
 export function createBot(deps: AppDeps): Bot<MyContext> {
   const bot = new Bot<MyContext>(config.botToken);
@@ -41,7 +40,6 @@ export function createBot(deps: AppDeps): Bot<MyContext> {
   // Commands resolve inside each feature; mode-gated free text excludes commands,
   // so a command is never swallowed by another mode's text handler (design-doc.md §8).
   bot.use(createReviewFeature(deps));
-  bot.use(createTestFeature(deps));
   bot.use(createSettingsFeature(deps));
   bot.use(createAddFeature(deps));
 
@@ -51,7 +49,6 @@ export function createBot(deps: AppDeps): Bot<MyContext> {
 export async function setupCommands(bot: Bot<MyContext>): Promise<void> {
   await bot.api.setMyCommands([
     { command: 'repeat', description: 'Повторение' },
-    { command: 'test', description: 'Тестирование' },
     { command: 'settings', description: 'Настройки' },
   ]);
 }

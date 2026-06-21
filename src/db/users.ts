@@ -19,21 +19,23 @@ export async function ensureUser(db: DB, tgChatId: number, timezone: string): Pr
   return row.id;
 }
 
-/** A user's id + ALL their editable settings — shared by review/test/add and the settings menu. */
+/** A user's id + ALL their editable settings — shared by the review flow, add, and the settings menu. */
 export interface UserContext {
   userId: number;
   timezone: string; // IANA tz — source of truth for SRS dates (known_issues.md §6)
-  reviewCount: number;
+  /** Daily session budget N (capped by the deck via lib/srs reviewSessionSize). */
+  sessionSize: number;
   /** `settings.review_time` as 'HH:MM:SS' (Postgres `time`); used by the settings menu. */
   reviewTime: string;
-  testCount: number;
+  /** Cap on brand-new words introduced per session (design-doc.md §5). */
+  newPerDay: number;
 }
 
 /**
  * Read-only resolve of a user's internal id + all editable settings, by chat id (no
  * provisioning — that belongs at flow entry via `ensureUser`). The single "user +
- * settings by chat" reader: each consumer reads the subset it needs (review uses
- * reviewCount, test uses testCount, the menu uses all incl. reviewTime), so it's a
+ * settings by chat" reader: each consumer reads the subset it needs (the review flow
+ * uses sessionSize/newPerDay, the menu uses all incl. reviewTime), so it's a
  * shared superset rather than per-role shapes — one join predicate, one place to
  * change. Returns null if the user has no row yet (e.g. a DB reset mid-session) so
  * callers can bail gracefully. (The fleet-wide scheduler read is separate below.)
@@ -43,9 +45,9 @@ export async function getUserContext(db: DB, tgChatId: number): Promise<UserCont
     .select({
       userId: users.id,
       timezone: settings.timezone,
-      reviewCount: settings.reviewCount,
+      sessionSize: settings.sessionSize,
       reviewTime: settings.reviewTime,
-      testCount: settings.testCount,
+      newPerDay: settings.newPerDay,
     })
     .from(users)
     .innerJoin(settings, eq(settings.userId, users.id))
@@ -74,9 +76,13 @@ export interface ScheduledReviewCandidate {
   /** `settings.review_time` as 'HH:MM:SS' (Postgres `time`). */
   reviewTime: string;
   timezone: string;
-  reviewCount: number;
+  sessionSize: number;
+  newPerDay: number;
   /** Last daily-review date in the user's TZ ('YYYY-MM-DD'), or null if never. */
   lastReviewedOn: string | null;
+  /** Behind-pace hysteresis counters (design-doc.md §5). */
+  backlogStrikes: number;
+  aheadStrikes: number;
 }
 
 /**
@@ -91,8 +97,11 @@ export async function getScheduledReviewCandidates(db: DB): Promise<ScheduledRev
       tgChatId: users.tgChatId,
       reviewTime: settings.reviewTime,
       timezone: settings.timezone,
-      reviewCount: settings.reviewCount,
+      sessionSize: settings.sessionSize,
+      newPerDay: settings.newPerDay,
       lastReviewedOn: users.lastReviewedOn,
+      backlogStrikes: users.backlogStrikes,
+      aheadStrikes: users.aheadStrikes,
     })
     .from(users)
     .innerJoin(settings, eq(settings.userId, users.id));
@@ -117,7 +126,23 @@ export async function markReviewedToday(db: DB, userId: number, date: string): P
 export async function updateSettings(
   db: DB,
   userId: number,
-  patch: Partial<{ reviewCount: number; reviewTime: string; testCount: number }>,
+  patch: Partial<{ sessionSize: number; reviewTime: string; newPerDay: number }>,
 ): Promise<void> {
   await db.update(settings).set(patch).where(eq(settings.userId, userId));
+}
+
+/**
+ * Persist the behind-pace hysteresis counters after a daily send (design-doc.md §5).
+ * Separate from `markReviewedToday` so the scheduler updates them in the same
+ * once-daily branch (not per tick); the pure update rule lives in `services/scheduler`.
+ */
+export async function updatePaceState(
+  db: DB,
+  userId: number,
+  state: { backlogStrikes: number; aheadStrikes: number },
+): Promise<void> {
+  await db
+    .update(users)
+    .set({ backlogStrikes: state.backlogStrikes, aheadStrikes: state.aheadStrikes })
+    .where(eq(users.id, userId));
 }

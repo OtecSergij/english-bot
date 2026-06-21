@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isReminderDue, pluralRu } from './scheduler';
+import { isReminderDue, pluralRu, updatePaceCounters, PACE_STRIKE_LIMIT } from './scheduler';
 
 const base = {
   nowHHMM: '09:30',
@@ -53,4 +53,54 @@ test('pluralRu picks the right Russian form, incl. the 11–14 exception', () =>
   assert.equal(p(14), 'слов');
   assert.equal(p(111), 'слов');
   assert.equal(p(112), 'слов');
+});
+
+// ── Behind-pace hysteresis ───────────────────────────────────────────────────
+
+const pace = (
+  over: Partial<Parameters<typeof updatePaceCounters>[0]> = {},
+): ReturnType<typeof updatePaceCounters> =>
+  updatePaceCounters({
+    backlog: 0,
+    sessionSize: 5,
+    newReady: 0,
+    backlogStrikes: 0,
+    aheadStrikes: 0,
+    ...over,
+  });
+
+test('pace: never nudges on day 1 (counters start at 0)', () => {
+  const r = pace({ backlog: 20, newReady: 5 });
+  assert.equal(r.backlogStrikes, 1);
+  assert.equal(r.nudge, null);
+});
+
+test('pace: a behind nudge fires after the strike limit, suggesting N = backlog', () => {
+  const r = pace({ backlog: 12, newReady: 3, backlogStrikes: PACE_STRIKE_LIMIT - 1 });
+  assert.equal(r.backlogStrikes, PACE_STRIKE_LIMIT);
+  assert.deepEqual(r.nudge, { kind: 'behind', suggested: 12 });
+});
+
+test('pace: behind nudge is suppressed when no new words are being added', () => {
+  const r = pace({ backlog: 12, newReady: 0, backlogStrikes: PACE_STRIKE_LIMIT - 1 });
+  assert.equal(r.backlogStrikes, PACE_STRIKE_LIMIT); // still counts, just no nudge
+  assert.equal(r.nudge, null);
+});
+
+test('pace: a within-budget day resets the backlog strikes', () => {
+  const r = pace({ backlog: 3, sessionSize: 5, backlogStrikes: 2 });
+  assert.equal(r.backlogStrikes, 0);
+  assert.equal(r.nudge, null);
+});
+
+test('pace: backlog == N is not over budget (boundary)', () => {
+  const r = pace({ backlog: 5, sessionSize: 5, newReady: 2, backlogStrikes: PACE_STRIKE_LIMIT - 1 });
+  assert.equal(r.backlogStrikes, 0);
+  assert.equal(r.nudge, null);
+});
+
+test('pace: ahead strikes accrue on fully-cleared days and reset when work returns', () => {
+  assert.equal(pace({ backlog: 0, aheadStrikes: 2 }).aheadStrikes, 3);
+  assert.equal(pace({ backlog: 4, sessionSize: 5, aheadStrikes: 2 }).aheadStrikes, 0);
+  assert.equal(pace({ backlog: 9, sessionSize: 5, aheadStrikes: 2 }).aheadStrikes, 0);
 });

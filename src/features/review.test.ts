@@ -1,61 +1,137 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { renderReviewAnswer, renderReviewQuestion, sessionComplete } from './review';
-import type { ReviewWord } from '../db/words';
+import { applyOutcome, renderQuestion, renderStep, renderSummary, sessionComplete } from './review';
+import type { SessionCard } from '../db/words';
 
-test('sessionComplete is true once reviewed reaches the session size', () => {
-  assert.equal(sessionComplete(0, 9), false);
-  assert.equal(sessionComplete(8, 9), false);
-  assert.equal(sessionComplete(9, 9), true); // graded all due (< review_count)
-  assert.equal(sessionComplete(10, 10), true); // hit the review_count cap
+const CORRECT = { failed: false, retry: false };
+const WRONG = { failed: true, retry: true };
+const REVEAL = { failed: true, retry: false };
+
+// ── The queue cycle (re-homed from the test flow; logic unchanged) ────────────
+
+test('applyOutcome: a correct answer removes the current card, no failure', () => {
+  assert.deepEqual(applyOutcome({ queue: [1, 2, 3], failedIds: [] }, CORRECT), {
+    queue: [2, 3],
+    failedIds: [],
+  });
 });
 
-const base: ReviewWord = {
-  id: 1,
-  russian: 'дом',
-  english: 'house',
-  exampleRu: null,
-  exampleEn: null,
-  intervalIndex: 0,
-};
-
-test('renderReviewQuestion shows the 1-based step and prompt, hides the answer', () => {
-  assert.equal(renderReviewQuestion(0, 9, base), '1/9\n<b>дом</b>');
+test('applyOutcome: a wrong answer re-queues the card at the back and records the failure', () => {
+  assert.deepEqual(applyOutcome({ queue: [1, 2, 3], failedIds: [] }, WRONG), {
+    queue: [2, 3, 1],
+    failedIds: [1],
+  });
 });
 
-test('renderReviewQuestion keeps the Russian example as a hint (no English half)', () => {
-  const card: ReviewWord = {
-    ...base,
-    exampleRu: 'Мой дом большой.',
-    exampleEn: 'My house is big.',
-  };
-  assert.equal(renderReviewQuestion(2, 9, card), '3/9\n<b>дом</b>\nПример: Мой дом большой.');
+test('applyOutcome: reveal removes the card (no re-queue) and records the failure', () => {
+  assert.deepEqual(applyOutcome({ queue: [1, 2, 3], failedIds: [] }, REVEAL), {
+    queue: [2, 3],
+    failedIds: [1],
+  });
 });
 
-test('renderReviewAnswer reveals the English answer and the example half', () => {
-  assert.equal(renderReviewAnswer(0, 9, base), '1/9\n<b>дом</b> — house');
-  const card: ReviewWord = {
-    ...base,
-    exampleRu: 'Мой дом большой.',
-    exampleEn: 'My house is big.',
-  };
+test('applyOutcome: failedIds is deduped across repeated failures of the same card', () => {
+  assert.deepEqual(applyOutcome({ queue: [1, 2], failedIds: [1] }, WRONG), {
+    queue: [2, 1],
+    failedIds: [1],
+  });
+});
+
+test('applyOutcome: a correct answer after an earlier failure keeps the failure on record', () => {
+  assert.deepEqual(applyOutcome({ queue: [1, 2], failedIds: [1] }, CORRECT), {
+    queue: [2],
+    failedIds: [1],
+  });
+});
+
+test('applyOutcome: an empty queue is a no-op', () => {
+  assert.deepEqual(applyOutcome({ queue: [], failedIds: [3] }, WRONG), {
+    queue: [],
+    failedIds: [3],
+  });
+});
+
+test('sessionComplete is true only when the queue is empty', () => {
+  assert.equal(sessionComplete([1]), false);
+  assert.equal(sessionComplete([]), true);
+});
+
+// ── Renders ───────────────────────────────────────────────────────────────
+
+const card = (
+  id: number,
+  russian: string,
+  english: string,
+  exampleRu: string | null = null,
+  exampleEn: string | null = null,
+): SessionCard => ({ id, russian, english, exampleRu, exampleEn, intervalIndex: 0 });
+
+test('renderQuestion counts 1-based and asks for the English translation', () => {
   assert.equal(
-    renderReviewAnswer(0, 9, card),
-    '1/9\n<b>дом</b> — house\nПример: Мой дом большой. — My house is big.',
+    renderQuestion(0, 10, card(1, 'дом', 'house')),
+    '1/10\n\n<b>дом</b>\n\nНапиши перевод на английский:',
+  );
+  assert.match(renderQuestion(9, 10, card(1, 'дом', 'house')), /^10\/10\n/);
+});
+
+test('renderQuestion keeps the Russian example as a hint (never the English)', () => {
+  assert.equal(
+    renderQuestion(2, 9, card(1, 'дом', 'house', 'Мой дом большой.', 'My house is big.')),
+    '3/9\n\n<b>дом</b>\nМой дом большой.\n\nНапиши перевод на английский:',
   );
 });
 
-test('renderReviewQuestion / renderReviewAnswer escape HTML in every field', () => {
-  const card: ReviewWord = {
-    ...base,
-    russian: 'a<b',
-    english: 'x&y',
-    exampleRu: '1<2',
-    exampleEn: '3>2',
-  };
-  assert.equal(renderReviewQuestion(0, 1, card), '1/1\n<b>a&lt;b</b>\nПример: 1&lt;2');
+test('renderQuestion inserts a ⚠️ note above the prompt', () => {
   assert.equal(
-    renderReviewAnswer(0, 1, card),
-    '1/1\n<b>a&lt;b</b> — x&amp;y\nПример: 1&lt;2 — 3&gt;2',
+    renderQuestion(0, 10, card(1, 'кот', 'cat'), '⚠️ Отвечай на английском.'),
+    '1/10\n\n⚠️ Отвечай на английском.\n\n<b>кот</b>\n\nНапиши перевод на английский:',
+  );
+});
+
+test('renderQuestion escapes HTML in the prompt', () => {
+  assert.equal(
+    renderQuestion(0, 1, card(1, 'a<b', 'x')),
+    '1/1\n\n<b>a&lt;b</b>\n\nНапиши перевод на английский:',
+  );
+});
+
+test('renderStep shows the verdict + full card, then the next question in one message', () => {
+  const graded = card(1, 'собака', 'dog', 'Собака бежит.', 'The dog runs.');
+  const next = card(2, 'кот', 'cat');
+  assert.equal(
+    renderStep(graded, 'correct', 1, 3, next),
+    '✅ Верно! «собака» — «dog»\nСобака бежит.\nThe dog runs.\n\n— — —\n\n2/3\n\n<b>кот</b>\n\nНапиши перевод на английский:',
+  );
+});
+
+test('renderStep marks a wrong answer and a reveal differently', () => {
+  const graded = card(1, 'идти', 'walk');
+  const next = card(2, 'кот', 'cat');
+  assert.match(renderStep(graded, 'wrong', 0, 2, next), /^❌ Неверно\. Правильно: «идти» — «walk»/);
+  assert.match(renderStep(graded, 'reveal', 0, 2, next), /^Ответ: «идти» — «walk»/);
+});
+
+test('renderStep escapes HTML in the graded card', () => {
+  assert.match(
+    renderStep(card(1, 'a<b', 'x&y'), 'correct', 0, 2, card(2, 'кот', 'cat')),
+    /«a&lt;b» — «x&amp;y»/,
+  );
+});
+
+test('renderSummary celebrates a clean run', () => {
+  assert.equal(renderSummary(10, []), '✅ Повторение пройдено: 10/10. Отлично!');
+});
+
+test('renderSummary lists the words that were missed', () => {
+  assert.equal(
+    renderSummary(3, [card(1, 'дом', 'house'), card(2, 'кот', 'cat')]),
+    'Повторение завершено: 1/3 верно.\nОшибки были в:\n• дом → house\n• кот → cat',
+  );
+});
+
+test('renderSummary escapes HTML in the failed list', () => {
+  assert.equal(
+    renderSummary(1, [card(1, 'a<b', 'x&y')]),
+    'Повторение завершено: 0/1 верно.\nОшибки были в:\n• a&lt;b → x&amp;y',
   );
 });

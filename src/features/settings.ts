@@ -6,66 +6,59 @@ import { countWords } from '../db/words';
 import type { AppDeps } from '../deps';
 import { hhmm } from '../lib/dates';
 import { escapeHtml } from '../lib/html';
-import {
-  clampInt,
-  effectiveTestCount,
-  reviewCountMax,
-  COUNT_MIN,
-  TEST_COUNT_MAX,
-} from '../lib/settings';
+import { clampInt, effectiveNewPerDay, sessionSizeMax, COUNT_MIN, NEW_PER_DAY_MAX } from '../lib/settings';
 import { reviewSessionSize } from '../lib/srs';
 import { editFlow, deleteFlowMessage } from './flow';
 
 /**
  * Settings menu (design-doc.md §9). Like the rest of the bot it's ONE editable
- * message, but unlike review/test it holds NO session state: every screen (main /
- * count editor / time picker) is a pure function of the `settings` row + deck size,
- * the sub-screen is encoded in the callback data, and the message id comes from the
- * callback. So it needs no FSM mode, and it even survives a restart (nothing to lose
- * in memory). All callbacks live under the `set:` namespace.
+ * message, but unlike the review flow it holds NO session state: every screen (main /
+ * session-size editor / new-per-day editor / time picker) is a pure function of the
+ * `settings` row + deck size, the sub-screen is encoded in the callback data, and the
+ * message id comes from the callback. So it needs no FSM mode, and it even survives a
+ * restart (nothing to lose in memory). All callbacks live under the `set:` namespace.
  *
- * `review_count` is capped by the deck size (design-doc.md §9): the EFFECTIVE value
- * shown/edited is `reviewSessionSize(stored, deck)` — the very number a session runs
- * — so the screen can't drift from the scheduler/`startReview`. `test_count` has no
- * deck cap (its pool is the moving not-due subset), just [1, TEST_COUNT_MAX]. Time
- * is hour-only (minutes pinned to :00).
+ * `session_size` is capped by the deck size (design-doc.md §9): the EFFECTIVE value
+ * shown/edited is `reviewSessionSize(stored, deck)` — the very number a session runs —
+ * so the screen can't drift from the scheduler/`startSession`. `new_per_day` has no
+ * deck cap, just [0, NEW_PER_DAY_MAX] (0 = pause new words). Time is hour-only.
  */
 
 // ── Pure renderers (unit-tested) ────────────────────────────────────────────
 
-/** The overview screen. `review_count` is shown as its effective (deck-capped) value. */
+/** The overview screen. `session_size` is shown as its effective (deck-capped) value. */
 export function renderMain(
-  s: { reviewCount: number; reviewTime: string; testCount: number; timezone: string },
+  s: { sessionSize: number; reviewTime: string; newPerDay: number; timezone: string },
   deckSize: number,
 ): string {
   return [
     '⚙️ <b>Настройки</b>',
     '',
-    `📚 Слов на повторение: <b>${reviewSessionSize(s.reviewCount, deckSize)}</b> (в колоде: ${deckSize})`,
+    `📚 Слов в день: <b>${reviewSessionSize(s.sessionSize, deckSize)}</b> (в колоде: ${deckSize})`,
+    `🆕 Новых в день: <b>${effectiveNewPerDay(s.newPerDay)}</b>`,
     `⏰ Время повторения: <b>${hhmm(s.reviewTime)}</b>`,
-    `✍️ Слов на тест: <b>${effectiveTestCount(s.testCount)}</b>`,
     '',
     `🌍 Таймзона: ${escapeHtml(s.timezone)}`,
   ].join('\n');
 }
 
-/** The review-count editor: current effective value + the deck cap. */
-export function renderReviewCountEditor(value: number, deckSize: number): string {
+/** The session-size editor: current effective value + the deck cap. */
+export function renderSessionSizeEditor(value: number, deckSize: number): string {
   return [
     '📚 <b>Слов на ежедневное повторение</b>',
     '',
     `Сейчас: <b>${value}</b>`,
-    `Колода: ${deckSize} · максимум ${reviewCountMax(deckSize)}`,
+    `Колода: ${deckSize} · максимум ${sessionSizeMax(deckSize)}`,
   ].join('\n');
 }
 
-/** The test-count editor: current effective value + the fixed range. */
-export function renderTestCountEditor(value: number): string {
+/** The new-per-day editor: current effective value + the fixed range (min 0 = pause). */
+export function renderNewPerDayEditor(value: number): string {
   return [
-    '✍️ <b>Слов на тест-сессию</b>',
+    '🆕 <b>Новых слов в день</b>',
     '',
     `Сейчас: <b>${value}</b>`,
-    `Диапазон: ${COUNT_MIN}–${TEST_COUNT_MAX}`,
+    `Диапазон: 0–${NEW_PER_DAY_MAX} (0 — пауза новых)`,
   ].join('\n');
 }
 
@@ -83,16 +76,16 @@ export function renderTimePicker(reviewTime: string, timezone: string): string {
 
 function mainKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text('📚 Повторение', 'set:nav:rc')
-    .text('✍️ Тест', 'set:nav:tc')
+    .text('📚 Слов в день', 'set:nav:ss')
+    .text('🆕 Новых', 'set:nav:np')
     .row()
     .text('⏰ Время', 'set:nav:time')
     .row()
     .text('Закрыть', 'set:close');
 }
 
-/** A ±1/±5 stepper for a count editor (`kind` = which setting). */
-function stepperKeyboard(kind: 'rc' | 'tc'): InlineKeyboard {
+/** A ±1/±5 stepper for a count editor (`kind` = which setting: session-size / new-per-day). */
+function stepperKeyboard(kind: 'ss' | 'np'): InlineKeyboard {
   return new InlineKeyboard()
     .text('−5', `set:${kind}:-5`)
     .text('−1', `set:${kind}:-1`)
@@ -142,27 +135,23 @@ async function showMain(deps: AppDeps, ctx: MyContext): Promise<void> {
   await editPanel(ctx, renderMain(s, deck), mainKeyboard());
 }
 
-async function showReviewCount(deps: AppDeps, ctx: MyContext): Promise<void> {
+async function showSessionSize(deps: AppDeps, ctx: MyContext): Promise<void> {
   const s = await loadOrToast(deps, ctx);
   if (!s) return;
   const deck = await countWords(deps.db, s.userId);
   await ctx.answerCallbackQuery();
   await editPanel(
     ctx,
-    renderReviewCountEditor(reviewSessionSize(s.reviewCount, deck), deck),
-    stepperKeyboard('rc'),
+    renderSessionSizeEditor(reviewSessionSize(s.sessionSize, deck), deck),
+    stepperKeyboard('ss'),
   );
 }
 
-async function showTestCount(deps: AppDeps, ctx: MyContext): Promise<void> {
+async function showNewPerDay(deps: AppDeps, ctx: MyContext): Promise<void> {
   const s = await loadOrToast(deps, ctx);
   if (!s) return;
   await ctx.answerCallbackQuery();
-  await editPanel(
-    ctx,
-    renderTestCountEditor(effectiveTestCount(s.testCount)),
-    stepperKeyboard('tc'),
-  );
+  await editPanel(ctx, renderNewPerDayEditor(effectiveNewPerDay(s.newPerDay)), stepperKeyboard('np'));
 }
 
 async function showTime(deps: AppDeps, ctx: MyContext): Promise<void> {
@@ -177,28 +166,28 @@ async function showTime(deps: AppDeps, ctx: MyContext): Promise<void> {
   );
 }
 
-async function stepReviewCount(deps: AppDeps, ctx: MyContext, delta: number): Promise<void> {
+async function stepSessionSize(deps: AppDeps, ctx: MyContext, delta: number): Promise<void> {
   const s = await loadOrToast(deps, ctx);
   if (!s) return;
   const deck = await countWords(deps.db, s.userId);
-  const max = reviewCountMax(deck);
+  const max = sessionSizeMax(deck);
   // Step from the EFFECTIVE value (deck-capped), so a no-op tap at the cap never
   // silently lowers the stored ceiling — the default survives the deck growing.
-  const eff = reviewSessionSize(s.reviewCount, deck);
+  const eff = reviewSessionSize(s.sessionSize, deck);
   const next = clampInt(eff + delta, COUNT_MIN, max);
-  if (next !== eff) await updateSettings(deps.db, s.userId, { reviewCount: next });
+  if (next !== eff) await updateSettings(deps.db, s.userId, { sessionSize: next });
   await ctx.answerCallbackQuery();
-  await editPanel(ctx, renderReviewCountEditor(next, deck), stepperKeyboard('rc'));
+  await editPanel(ctx, renderSessionSizeEditor(next, deck), stepperKeyboard('ss'));
 }
 
-async function stepTestCount(deps: AppDeps, ctx: MyContext, delta: number): Promise<void> {
+async function stepNewPerDay(deps: AppDeps, ctx: MyContext, delta: number): Promise<void> {
   const s = await loadOrToast(deps, ctx);
   if (!s) return;
-  const eff = effectiveTestCount(s.testCount);
-  const next = clampInt(eff + delta, COUNT_MIN, TEST_COUNT_MAX);
-  if (next !== eff) await updateSettings(deps.db, s.userId, { testCount: next });
+  const eff = effectiveNewPerDay(s.newPerDay);
+  const next = clampInt(eff + delta, 0, NEW_PER_DAY_MAX); // min 0 — pausing new words is valid
+  if (next !== eff) await updateSettings(deps.db, s.userId, { newPerDay: next });
   await ctx.answerCallbackQuery();
-  await editPanel(ctx, renderTestCountEditor(next), stepperKeyboard('tc'));
+  await editPanel(ctx, renderNewPerDayEditor(next), stepperKeyboard('np'));
 }
 
 async function setTime(deps: AppDeps, ctx: MyContext, hour: number): Promise<void> {
@@ -234,15 +223,11 @@ export function createSettingsFeature(deps: AppDeps): Composer<MyContext> {
   });
 
   feature.callbackQuery('set:nav:main', (ctx) => showMain(deps, ctx));
-  feature.callbackQuery('set:nav:rc', (ctx) => showReviewCount(deps, ctx));
-  feature.callbackQuery('set:nav:tc', (ctx) => showTestCount(deps, ctx));
+  feature.callbackQuery('set:nav:ss', (ctx) => showSessionSize(deps, ctx));
+  feature.callbackQuery('set:nav:np', (ctx) => showNewPerDay(deps, ctx));
   feature.callbackQuery('set:nav:time', (ctx) => showTime(deps, ctx));
-  feature.callbackQuery(/^set:rc:(-?\d+)$/, (ctx) =>
-    stepReviewCount(deps, ctx, Number(ctx.match[1])),
-  );
-  feature.callbackQuery(/^set:tc:(-?\d+)$/, (ctx) =>
-    stepTestCount(deps, ctx, Number(ctx.match[1])),
-  );
+  feature.callbackQuery(/^set:ss:(-?\d+)$/, (ctx) => stepSessionSize(deps, ctx, Number(ctx.match[1])));
+  feature.callbackQuery(/^set:np:(-?\d+)$/, (ctx) => stepNewPerDay(deps, ctx, Number(ctx.match[1])));
   feature.callbackQuery(/^set:time:(\d+)$/, (ctx) => setTime(deps, ctx, Number(ctx.match[1])));
   feature.callbackQuery('set:close', async (ctx) => {
     await ctx.answerCallbackQuery();

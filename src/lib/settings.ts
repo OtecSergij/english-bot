@@ -2,15 +2,14 @@
 // validation/clamping is unit-tested apart from the DB/Telegram plumbing — and so
 // the feature layer and the scheduler share ONE definition of each bound.
 
-/** Lowest allowed value for both counts (design-doc.md §9: review/test ≥ 1). */
+/** Lowest allowed `session_size` (a non-empty deck always runs ≥ 1 word). */
 export const COUNT_MIN = 1;
 
 /**
- * Ceiling for `test_count`. The test pool is the not-due subset (a moving target),
- * so unlike review there's no deck cap — just a sane upper bound that also stops the
- * stepper from running away. Tunable.
+ * Ceiling for `new_per_day` — a sane upper bound that also stops the stepper from
+ * running away. The lower bound is 0 (pause new words; reviews still run). Tunable.
  */
-export const TEST_COUNT_MAX = 50;
+export const NEW_PER_DAY_MAX = 20;
 
 /** Clamp an integer into [min, max] (assumes min ≤ max). */
 export function clampInt(n: number, min: number, max: number): number {
@@ -18,17 +17,17 @@ export function clampInt(n: number, min: number, max: number): number {
 }
 
 /**
- * Upper bound for `review_count` — the deck size (design-doc.md §9: "макс = размер
+ * Upper bound for `session_size` — the deck size (design-doc.md §9: "макс = размер
  * колоды"), but never below 1 so an empty/tiny deck still allows the floor value.
- * Note: the EFFECTIVE review_count (what a session actually runs) is
+ * Note: the EFFECTIVE session size (what a run actually covers) is
  * `reviewSessionSize(stored, deck)` from lib/srs — identical to clamping `stored`
  * into [1, this], which is why the settings screen reuses that single source.
  */
-export function reviewCountMax(deckSize: number): number {
+export function sessionSizeMax(deckSize: number): number {
   return Math.max(COUNT_MIN, deckSize);
 }
 
-/** Effective `test_count`: stored value clamped into [1, TEST_COUNT_MAX]. */
-export function effectiveTestCount(stored: number): number {
-  return clampInt(stored, COUNT_MIN, TEST_COUNT_MAX);
+/** Effective `new_per_day`: stored value clamped into [0, NEW_PER_DAY_MAX]. */
+export function effectiveNewPerDay(stored: number): number {
+  return clampInt(stored, 0, NEW_PER_DAY_MAX);
 }

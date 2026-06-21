@@ -1,4 +1,4 @@
-// Deterministic test grading (design-doc.md §6).
+// Deterministic answer grading (design-doc.md §6).
 // Forgive a leading article / "to"; reject synonyms and typos.
 
 const LEADING_ARTICLE = /^(?:a|an|the)\s+/i;

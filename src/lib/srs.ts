@@ -18,7 +18,7 @@ export function promote(index: number): number {
   return clampIndex(index + 1);
 }
 
-/** Index after a failure ("не помню" / wrong test). */
+/** Index after a failure (wrong typed answer / reveal). */
 export function reset(): number {
   return 0;
 }
@@ -33,14 +33,43 @@ export function nextReviewDate(today: DateStr, index: number): DateStr {
 }
 
 /**
- * How many cards a review session covers (design-doc.md §5): `review_count`, capped
- * by the deck size, floored at 1 so a non-empty deck always yields ≥1 card. The
- * SINGLE source of truth for the session size — used both by `startReview` (the
- * actual run) and the scheduler's reminder text, so the "N слов" shown can't drift
- * from the real session. The `max(1, …)` floor is also defense-in-depth: settings
- * already validate `review_count >= 1` (lib/settings), so it only guards a
- * hand-edited/legacy row from degenerating the session — kept in ONE place.
+ * The effective daily session size (design-doc.md §5): the stored `session_size`,
+ * capped by the deck and floored at 1 so a non-empty deck always yields ≥1 card. The
+ * single source of truth for the size shown in settings; `startSession` covers at most
+ * this many words (it may run fewer when there's less ready work). The `max(1, …)`
+ * floor is defense-in-depth — settings already validate `session_size >= 1` — so it
+ * only guards a hand-edited/legacy row from degenerating the session.
  */
-export function reviewSessionSize(reviewCount: number, deckSize: number): number {
-  return Math.max(1, Math.min(reviewCount, deckSize));
+export function reviewSessionSize(sessionSize: number, deckSize: number): number {
+  return Math.max(1, Math.min(sessionSize, deckSize));
+}
+
+/**
+ * Compose the daily session from the three selection buckets (design-doc.md §5), in
+ * strict priority order:
+ *   1. `reviewsReady` — due words seen before (most-overdue-first): the starvation
+ *      guarantee, every word eventually reaches the front.
+ *   2. `newReady` — brand-new words (already capped to `new_per_day` by the caller):
+ *      reviews outrank new intake, so new words only fill leftover budget.
+ *   3. `topUp` — not-yet-due seen words (manual `/repeat` only; empty for the
+ *      scheduled run, which respects spacing): keeps a manual session full.
+ * Deduped by id and sliced to the budget `n`. Pure, so the budget logic is unit-tested
+ * apart from the DB; the result is naturally bounded by the available cards (an empty
+ * bucket set yields `[]` regardless of `n` — no phantom cards).
+ */
+export function planSession<T extends { id: number }>(
+  reviewsReady: T[],
+  newReady: T[],
+  topUp: T[],
+  n: number,
+): T[] {
+  const seen = new Set<number>();
+  const out: T[] = [];
+  for (const card of [...reviewsReady, ...newReady, ...topUp]) {
+    if (out.length >= n) break;
+    if (seen.has(card.id)) continue;
+    seen.add(card.id);
+    out.push(card);
+  }
+  return out;
 }

@@ -1,92 +1,224 @@
 import { Composer, InlineKeyboard } from 'grammy';
 import { config } from '../config';
-import { freeTextIn, nonTextIn, testExpired, type MyContext, type ReviewState } from '../context';
+import {
+  freeTextIn,
+  nonTextIn,
+  sessionExpired,
+  type MyContext,
+  type ReviewState,
+} from '../context';
 import { ensureUser, getUserContext, markReviewedToday } from '../db/users';
-import { countWords, nextReviewWord, updateWordSchedule, type ReviewWord } from '../db/words';
+import { recordOutcome, selectSession, type SessionCard } from '../db/words';
 import type { AppDeps } from '../deps';
 import { todayInTz } from '../lib/dates';
+import { isCorrect } from '../lib/grading';
 import { escapeHtml } from '../lib/html';
-import { nextReviewDate, promote, reset, reviewSessionSize } from '../lib/srs';
+import { detectLang } from '../lib/lang';
+import { nextReviewDate, promote, reset } from '../lib/srs';
 import { deleteFlowMessage, editFlow, resetSession } from './flow';
-import { discardTest } from './test';
 
-/**
- * Pure session-end check (design-doc.md §5): the session is done once `done` cards
- * reach the session size `total`. Kept side-effect-free so the "session size = N"
- * rule is unit-testable apart from the DB/Telegram plumbing.
- */
-export function sessionComplete(done: number, total: number): boolean {
-  return done >= total;
+// ---------------------------------------------------------------------------
+// Pure helpers (no DB / Telegram) — the heart of the cycle, unit-tested apart.
+// ---------------------------------------------------------------------------
+
+/** The remaining-cards cycle (design-doc.md §5). The current card is always `queue[0]`. */
+export interface ReviewProgress {
+  queue: number[];
+  failedIds: number[];
 }
 
 /**
- * The HIDDEN review card (design-doc.md §5): the prompt side only — Russian word
- * (+ the Russian example as a hint). The English answer is revealed by the
- * «Показать ответ» button (a native spoiler leaks its revealed state across edits
- * of the one session message, so we hide by omission instead). First line: `N/total`.
+ * Apply one graded outcome to the cycle (design-doc.md §5):
+ * - `retry` → the current card goes to the back (re-asked until correct);
+ * - otherwise it leaves the queue (correct, or revealed/skipped);
+ * - `failed` records the id (deduped) — the score, and it's already saved in the DB.
+ *
+ * Correct = `{failed:false, retry:false}`; wrong = `{failed:true, retry:true}`;
+ * reveal = `{failed:true, retry:false}`.
  */
-export function renderReviewQuestion(done: number, total: number, card: ReviewWord): string {
-  const lines = [`${done + 1}/${total}`, `<b>${escapeHtml(card.russian)}</b>`];
-  if (card.exampleRu) lines.push(`Пример: ${escapeHtml(card.exampleRu)}`);
+export function applyOutcome(
+  p: ReviewProgress,
+  outcome: { failed: boolean; retry: boolean },
+): ReviewProgress {
+  const [current, ...rest] = p.queue;
+  if (current === undefined) return p;
+  const queue = outcome.retry ? [...rest, current] : rest;
+  const failedIds =
+    outcome.failed && !p.failedIds.includes(current) ? [...p.failedIds, current] : p.failedIds;
+  return { queue, failedIds };
+}
+
+/** The session ends once every word has left the cycle (correct or revealed). */
+export function sessionComplete(queue: number[]): boolean {
+  return queue.length === 0;
+}
+
+/** How the just-graded card is summarised above the next prompt. */
+export type ResultKind = 'correct' | 'wrong' | 'reveal';
+
+/** Visual divider between the previous result and the next question in one message. */
+const SEP = '— — —';
+
+/** Prompt — answer, both quoted: the shared shape for revealing a card. */
+function answerLine(card: SessionCard): string {
+  return `«${escapeHtml(card.russian)}» — «${escapeHtml(card.english)}»`;
+}
+
+function resultHeader(kind: ResultKind, card: SessionCard): string {
+  if (kind === 'correct') return `✅ Верно! ${answerLine(card)}`;
+  if (kind === 'wrong') return `❌ Неверно. Правильно: ${answerLine(card)}`;
+  return `Ответ: ${answerLine(card)}`; // reveal / skip
+}
+
+/** Both examples, shown only AFTER grading (reinforcement); either may be absent. */
+function exampleLines(card: SessionCard): string[] {
+  const lines: string[] = [];
+  if (card.exampleRu) lines.push(escapeHtml(card.exampleRu));
+  if (card.exampleEn) lines.push(escapeHtml(card.exampleEn));
+  return lines;
+}
+
+/**
+ * A question (design-doc.md §5): the counter, an optional ⚠️ note (e.g. wrong
+ * input language), the Russian prompt, the Russian example as a hint (never the
+ * English — that would leak the answer), then the ask. The counter is `done + 1` —
+ * the 1-based position of the card being CLOSED; after a wrong answer it repeats on
+ * the re-ask (honest: that card is still being closed, the cycle just brought it back).
+ */
+export function renderQuestion(
+  done: number,
+  total: number,
+  card: SessionCard,
+  note?: string,
+): string {
+  const lines = [`${done + 1}/${total}`];
+  if (note) lines.push('', note);
+  lines.push('', `<b>${escapeHtml(card.russian)}</b>`);
+  if (card.exampleRu) lines.push(escapeHtml(card.exampleRu));
+  lines.push('', 'Напиши перевод на английский:');
   return lines.join('\n');
 }
 
-/** The REVEALED review card (design-doc.md §5): adds the English answer + example half. */
-export function renderReviewAnswer(done: number, total: number, card: ReviewWord): string {
-  const lines = [
-    `${done + 1}/${total}`,
-    `<b>${escapeHtml(card.russian)}</b> — ${escapeHtml(card.english)}`,
-  ];
-  if (card.exampleRu && card.exampleEn) {
-    lines.push(`Пример: ${escapeHtml(card.exampleRu)} — ${escapeHtml(card.exampleEn)}`);
-  }
-  return lines.join('\n');
+/**
+ * One edited message carrying the just-graded card's result (verdict + full card)
+ * AND the next question below it — so the correction stays visible while the user
+ * answers the next word, with no «Дальше» tap (design-doc.md §5).
+ */
+export function renderStep(
+  graded: SessionCard,
+  kind: ResultKind,
+  done: number,
+  total: number,
+  next: SessionCard,
+): string {
+  return [
+    resultHeader(kind, graded),
+    ...exampleLines(graded),
+    '',
+    SEP,
+    '',
+    renderQuestion(done, total, next),
+  ].join('\n');
 }
 
-/** Hidden card: reveal + grade (grading without revealing stays allowed, as with the old spoiler). */
-function hiddenKeyboard(id: number): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('Показать ответ', `review:reveal:${id}`)
-    .row()
-    .text('Помню', `review:remember:${id}`)
-    .text('Не помню', `review:forget:${id}`);
+/** End-of-session summary — kept in the chat as the result (to-do §UX). */
+export function renderSummary(total: number, failed: SessionCard[]): string {
+  const correct = total - failed.length;
+  if (failed.length === 0) return `✅ Повторение пройдено: ${correct}/${total}. Отлично!`;
+  const list = failed.map((w) => `• ${escapeHtml(w.russian)} → ${escapeHtml(w.english)}`).join('\n');
+  return `Повторение завершено: ${correct}/${total} верно.\nОшибки были в:\n${list}`;
 }
 
-/** Revealed card: just the grade buttons. */
-function gradeKeyboard(id: number): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('Помню', `review:remember:${id}`)
-    .text('Не помню', `review:forget:${id}`);
+// ---------------------------------------------------------------------------
+// Session plumbing
+// ---------------------------------------------------------------------------
+
+function revealKeyboard(id: number): InlineKeyboard {
+  return new InlineKeyboard().text('Показать ответ', `review:reveal:${id}`);
 }
 
-/** Close the session: nothing to show at the end, just delete the flow message (to-do §UX). */
-async function finishFlow(ctx: MyContext, review: ReviewState): Promise<void> {
-  await deleteFlowMessage(ctx, review.messageId);
+function currentCard(review: ReviewState): SessionCard | undefined {
+  return review.cards.find((c) => c.id === review.queue[0]);
+}
+
+/**
+ * Drop a session and remove its dangling flow message (timed out / desynced). Safe
+ * when there is no review state.
+ */
+async function discardSession(ctx: MyContext): Promise<void> {
+  if (ctx.session.review) await deleteFlowMessage(ctx, ctx.session.review.messageId);
+  resetSession(ctx);
+}
+
+/** Edit the flow message to the timeout note and close the session (design-doc.md §5). */
+async function closeOnTimeout(ctx: MyContext, review: ReviewState): Promise<void> {
+  await editFlow(
+    ctx,
+    review.messageId,
+    '⏱ Повторение закрыто из-за неактивности. /repeat — начать заново.',
+  );
+  resetSession(ctx);
+}
+
+/** Edit the flow message to the end-of-session summary and reset. */
+async function finishSession(ctx: MyContext, review: ReviewState): Promise<void> {
+  const failed = review.failedIds
+    .map((id) => review.cards.find((c) => c.id === id))
+    .filter((c): c is SessionCard => c !== undefined);
+  await editFlow(ctx, review.messageId, renderSummary(review.cards.length, failed));
   resetSession(ctx);
 }
 
 /**
- * Start a review session (design-doc.md §5). Review is ALWAYS available: it pulls
- * the N words with the smallest `next_review` (no due gate), N = min(review_count,
- * deck size). The whole session lives in one message. Manual entry for `/repeat`;
- * the scheduler's «Начать» button reuses this same path, passing `reuseMessageId`
- * so its reminder message morphs into the first card instead of a new one.
+ * Apply an outcome to the queue, then render the just-graded card's result + the next
+ * question in one message, or the summary when the cycle empties.
  */
-async function startReview(deps: AppDeps, ctx: MyContext, reuseMessageId?: number): Promise<void> {
+async function advanceStep(
+  ctx: MyContext,
+  review: ReviewState,
+  graded: { card: SessionCard; kind: ResultKind },
+  outcome: { failed: boolean; retry: boolean },
+): Promise<void> {
+  const next = applyOutcome({ queue: review.queue, failedIds: review.failedIds }, outcome);
+  review.queue = next.queue;
+  review.failedIds = next.failedIds;
+
+  const nextCard = currentCard(review);
+  if (sessionComplete(review.queue) || !nextCard) {
+    await finishSession(ctx, review);
+    return;
+  }
+  const done = review.cards.length - review.queue.length;
+  await editFlow(
+    ctx,
+    review.messageId,
+    renderStep(graded.card, graded.kind, done, review.cards.length, nextCard),
+    revealKeyboard(nextCard.id),
+  );
+}
+
+/**
+ * Start a «повторение» session (design-doc.md §5) — the single active-recall flow.
+ * `includeTopUp` distinguishes a manual `/repeat` (drill ahead with not-yet-due words
+ * when caught up) from the scheduled «Начать» (due/new work only, respecting spacing).
+ * `reuseMessageId` edits the scheduler's reminder message into the first question.
+ */
+async function startSession(
+  deps: AppDeps,
+  ctx: MyContext,
+  opts: { reuseMessageId?: number; includeTopUp: boolean },
+): Promise<void> {
   const chatId = ctx.chat?.id;
   if (chatId === undefined) return;
+  const now = Date.now();
 
-  // Re-entry / cross-mode / desync handling (design-doc.md §8).
+  // Don't clobber a live session (design-doc.md §8).
   if (ctx.session.mode === 'review') {
-    if (ctx.session.review) return; // genuine re-entry: card already on screen, don't restart
-    resetSession(ctx); // desync (mode without state) — fall through and start fresh
-  } else if (ctx.session.mode === 'test') {
-    // Don't clobber a LIVE test; an expired or desynced one is dropped so review can run.
-    if (ctx.session.test && !testExpired(ctx.session.test, Date.now())) {
-      await ctx.reply('Сейчас идёт тест — заверши его, прежде чем начинать повторение.');
+    if (ctx.session.review && !sessionExpired(ctx.session.review, now)) {
+      if (opts.reuseMessageId === undefined) await ctx.reply('Повторение уже идёт.');
       return;
     }
-    await discardTest(ctx);
+    await discardSession(ctx); // expired/desync → drop it and its dangling message
   }
 
   // Provision on entry (covers a fresh owner / DB reset), then read settings.
@@ -97,164 +229,206 @@ async function startReview(deps: AppDeps, ctx: MyContext, reuseMessageId?: numbe
     return;
   }
 
-  const deckSize = await countWords(deps.db, user.userId);
-  const first = deckSize > 0 ? await nextReviewWord(deps.db, user.userId, []) : null;
-  if (!first) {
+  const today = todayInTz(new Date(now), user.timezone);
+  const cards = await selectSession(deps.db, user.userId, today, user.sessionSize, user.newPerDay, {
+    includeTopUp: opts.includeTopUp,
+  });
+  if (cards.length === 0) {
+    // No stamp here (unlike a started session): selection is date-based, so an empty
+    // morning /repeat means the scheduler also sees no work at review_time and takes a
+    // silent rest day (which stamps) — there's nothing to suppress.
     resetSession(ctx);
-    await ctx.reply('В словаре пока нет слов — добавь хотя бы одно.');
+    const msg = 'На сегодня всё повторено. Добавь новые слова или загляни позже.';
+    if (opts.reuseMessageId !== undefined) await editFlow(ctx, opts.reuseMessageId, msg);
+    else await ctx.reply(msg);
     return;
   }
 
-  // Session size = review_count capped by deck, floored at 1 (shared rule, so the
-  // scheduler's reminder count can't drift from the actual run — see lib/srs).
-  const total = reviewSessionSize(user.reviewCount, deckSize);
-  // From the scheduler's reminder we EDIT that message into the first card (so it
-  // becomes the single flow message); a manual /repeat sends a fresh message.
-  const questionText = renderReviewQuestion(0, total, first);
+  const first = cards[0]!;
+  const text = renderQuestion(0, cards.length, first);
   let messageId: number;
-  if (reuseMessageId !== undefined) {
-    await editFlow(ctx, reuseMessageId, questionText, hiddenKeyboard(first.id));
-    messageId = reuseMessageId;
+  if (opts.reuseMessageId !== undefined) {
+    await editFlow(ctx, opts.reuseMessageId, text, revealKeyboard(first.id));
+    messageId = opts.reuseMessageId;
   } else {
-    const msg = await ctx.reply(questionText, {
+    const msg = await ctx.reply(text, {
       parse_mode: 'HTML',
-      reply_markup: hiddenKeyboard(first.id),
+      reply_markup: revealKeyboard(first.id),
     });
     messageId = msg.message_id;
   }
+
   ctx.session.mode = 'review';
   ctx.session.review = {
-    total,
-    seenIds: [],
-    current: first,
     messageId,
+    cards,
+    queue: cards.map((c) => c.id),
+    failedIds: [],
+    lastActivity: now,
     userId: user.userId,
     timezone: user.timezone,
   };
 
-  // Mark today's daily review as handled (design-doc.md §5): a manual start (or
-  // tapping the reminder) means the scheduler shouldn't also nag today. Non-fatal —
-  // worst case the reminder fires once more today.
+  // Stamp today's daily review as handled (design-doc.md §5): a manual run skips the
+  // scheduled reminder, and the reminder is sent at most once per day. Non-fatal.
   try {
-    await markReviewedToday(deps.db, user.userId, todayInTz(new Date(), user.timezone));
+    await markReviewedToday(deps.db, user.userId, today);
   } catch (err) {
-    console.error('Failed to stamp daily review date:', err);
+    console.error('Failed to stamp daily review:', err);
   }
 }
 
-/** «Показать ответ» — reveal the answer in place (no DB write); the card stays awaiting a grade. */
-async function handleReveal(ctx: MyContext): Promise<void> {
+/** A typed answer (free text while in REVIEW). Grade it; both outcomes auto-advance. */
+async function handleAnswer(deps: AppDeps, ctx: MyContext): Promise<void> {
   const review = ctx.session.review;
-  if (ctx.session.mode !== 'review' || !review || !review.current) {
-    await ctx.answerCallbackQuery({ text: 'Эта сессия повторения уже завершена.' });
+  if (ctx.session.mode !== 'review' || !review) {
+    resetSession(ctx); // desync safety
     return;
   }
-  if (Number(ctx.match?.[1]) !== review.current.id) {
-    await ctx.answerCallbackQuery({ text: 'Эта карточка уже пройдена.' });
+
+  const now = Date.now();
+  // Lazy timeout (design-doc.md §5): an abandoned session is closed on the next touch.
+  if (sessionExpired(review, now)) {
+    await ctx.deleteMessage().catch(() => undefined);
+    await closeOnTimeout(ctx, review);
     return;
   }
-  await ctx.answerCallbackQuery();
-  await editFlow(
+  review.lastActivity = now;
+
+  const input = (ctx.message?.text ?? '').trim();
+  // The answer is the user's input — drop it so only the flow message remains (to-do §UX).
+  await ctx.deleteMessage().catch(() => undefined);
+
+  const card = currentCard(review);
+  if (!card) {
+    await finishSession(ctx, review); // desync → close cleanly
+    return;
+  }
+
+  const done = review.cards.length - review.queue.length;
+  const reprompt = (note: string): Promise<unknown> =>
+    editFlow(
+      ctx,
+      review.messageId,
+      renderQuestion(done, review.cards.length, card, note),
+      revealKeyboard(card.id),
+    );
+
+  // A blank/RU answer must NOT be graded (it would reset SRS); §6: answers are English only.
+  if (input === '') {
+    await reprompt('⚠️ Пустой ответ — напиши перевод.');
+    return;
+  }
+  if (detectLang(input) === 'ru') {
+    await reprompt('⚠️ Отвечай на английском.');
+    return;
+  }
+
+  // `today` is recomputed here so a long session that crosses midnight still schedules
+  // correctly; userId + timezone are snapshotted in the session (stable).
+  const today = todayInTz(new Date(now), review.timezone);
+  const correct = isCorrect(input, card.english);
+  const index = correct ? promote(card.intervalIndex) : reset();
+
+  try {
+    await recordOutcome(deps.db, review.userId, card.id, {
+      intervalIndex: index,
+      nextReview: nextReviewDate(today, index),
+      testedAt: new Date(now),
+      // A lapse is counted once per session per card (first failure): a re-queued card
+      // failed again, or revealed after a wrong answer, must not inflate the counter.
+      lapsed: !correct && !review.failedIds.includes(card.id),
+    });
+  } catch (err) {
+    // The write didn't commit — keep the card on screen for a retry (no advance).
+    console.error('Failed to record review outcome:', err);
+    await reprompt('⚠️ Не удалось сохранить, попробуй ещё раз.');
+    return;
+  }
+  // Keep the in-memory snapshot in sync with the DB: a wrong answer re-queues the card,
+  // and when it's graded again later this session the next promote/reset must start from
+  // its CURRENT index (e.g. the reset 0), not the stale start-of-session value.
+  card.intervalIndex = index;
+
+  await advanceStep(
     ctx,
-    review.messageId,
-    renderReviewAnswer(review.seenIds.length, review.total, review.current),
-    gradeKeyboard(review.current.id),
+    review,
+    { card, kind: correct ? 'correct' : 'wrong' },
+    correct ? { failed: false, retry: false } : { failed: true, retry: true },
   );
 }
 
-/** A grade button was pressed — apply SRS, then edit the flow message to the next card. */
-async function handlePress(deps: AppDeps, ctx: MyContext): Promise<void> {
+/** «Показать ответ» — the emergency exit: reveal the answer, count as a lapse, advance. */
+async function handleReveal(deps: AppDeps, ctx: MyContext): Promise<void> {
   const review = ctx.session.review;
-  if (ctx.session.mode !== 'review' || !review || !review.current) {
-    await ctx.answerCallbackQuery({ text: 'Эта сессия повторения уже завершена.' });
+  if (ctx.session.mode !== 'review' || !review) {
+    await ctx.answerCallbackQuery({ text: 'Повторение уже завершено.' });
     return;
   }
 
-  const remembered = ctx.match?.[1] === 'remember';
-  const card = review.current;
-  if (Number(ctx.match?.[2]) !== card.id) {
+  const now = Date.now();
+  if (sessionExpired(review, now)) {
+    await ctx.answerCallbackQuery({ text: 'Повторение закрыто из-за неактивности.' });
+    await closeOnTimeout(ctx, review);
+    return;
+  }
+  review.lastActivity = now;
+
+  const card = currentCard(review);
+  if (!card || Number(ctx.match?.[1]) !== card.id) {
     await ctx.answerCallbackQuery({ text: 'Эта карточка уже пройдена.' });
     return;
   }
 
-  // userId + timezone are snapshotted in the session (stable); `today` is recomputed
-  // here so a long session that crosses midnight still schedules correctly. The
-  // current card carries `intervalIndex`, so no DB re-fetch is needed to grade.
-  const today = todayInTz(new Date(), review.timezone);
+  const today = todayInTz(new Date(now), review.timezone);
+  const index = reset();
   try {
-    const index = remembered ? promote(card.intervalIndex) : reset();
-    await updateWordSchedule(deps.db, review.userId, card.id, index, nextReviewDate(today, index));
+    await recordOutcome(deps.db, review.userId, card.id, {
+      intervalIndex: index,
+      nextReview: nextReviewDate(today, index),
+      testedAt: new Date(now),
+      // Once per session: a reveal after an earlier wrong answer must not double-count.
+      lapsed: !review.failedIds.includes(card.id),
+    });
   } catch (err) {
-    // The write didn't commit — keep the card (current unchanged) for a retry.
-    console.error('Failed to apply review outcome:', err);
+    console.error('Failed to record review reveal:', err);
     await ctx.answerCallbackQuery({ text: 'Не удалось сохранить, нажми ещё раз.' });
     return;
   }
+  card.intervalIndex = index; // keep the snapshot in sync with the DB (see handleAnswer)
   await ctx.answerCallbackQuery();
-
-  // Card consumed: record it (counts toward the session AND excludes it from the
-  // next pick) and drop `current` BEFORE advancing so a stale/double press can't
-  // re-grade it.
-  review.seenIds.push(card.id);
-  review.current = null;
-
-  // Advance. If loading the next card throws (transient DB error in this narrow
-  // window), end the session cleanly instead of leaving it stuck with no current
-  // card — the grade above is already committed, and `/repeat` resumes.
-  try {
-    const next = sessionComplete(review.seenIds.length, review.total)
-      ? null
-      : await nextReviewWord(deps.db, review.userId, review.seenIds);
-    if (!next) {
-      await finishFlow(ctx, review);
-      return;
-    }
-    review.current = next;
-    await editFlow(
-      ctx,
-      review.messageId,
-      renderReviewQuestion(review.seenIds.length, review.total, next),
-      hiddenKeyboard(next.id),
-    );
-  } catch (err) {
-    console.error('Failed to advance review:', err);
-    await finishFlow(ctx, review);
-  }
+  // Revealed words leave the queue (no re-ask) but count as a lapse.
+  await advanceStep(ctx, review, { card, kind: 'reveal' }, { failed: true, retry: false });
 }
 
-/** Daily review flow (design-doc.md §5). */
+/** The unified «повторение» flow (design-doc.md §5). */
 export function createReviewFeature(deps: AppDeps): Composer<MyContext> {
   const feature = new Composer<MyContext>();
 
   // Manual start. The "/repeat" command itself is removed so the chat stays at the
-  // single flow message. (Marking today's scheduled review as skipped: Phase 5.)
+  // single flow message. Manual runs drill ahead (top-up) when caught up.
   feature.command('repeat', async (ctx) => {
     await ctx.deleteMessage().catch(() => undefined);
-    await startReview(deps, ctx);
+    await startSession(deps, ctx, { includeTopUp: true });
   });
 
-  // Scheduler reminder → «Начать» (design-doc.md §5): start review in the SAME
-  // message — `startReview` edits the reminder into the first card. Goes through
-  // normal middleware, so it has a real session (no out-of-band session injection).
+  // The scheduler's «Начать» button reuses the reminder message; scheduled runs cover
+  // only due/new work (no top-up) so they respect spacing.
   feature.callbackQuery('review:start', async (ctx) => {
     await ctx.answerCallbackQuery();
-    await startReview(deps, ctx, ctx.callbackQuery.message?.message_id);
+    await startSession(deps, ctx, {
+      reuseMessageId: ctx.callbackQuery.message?.message_id,
+      includeTopUp: false,
+    });
   });
 
-  feature.callbackQuery(/^review:reveal:(\d+)$/, (ctx) => handleReveal(ctx));
-  feature.callbackQuery(/^review:(remember|forget):(\d+)$/, (ctx) => handlePress(deps, ctx));
+  feature.callbackQuery(/^review:reveal:(\d+)$/, (ctx) => handleReveal(deps, ctx));
 
-  // §5 collision: free text during review is noise (no adding words mid-review).
-  // The card already lives in the flow message, so we silently delete the stray
-  // text — nothing is sent back (to-do §UX).
-  feature.filter(freeTextIn('review')).on('message:text', async (ctx) => {
-    await ctx.deleteMessage().catch(() => undefined);
-    if (!ctx.session.review) resetSession(ctx); // desync safety
-  });
+  // §6: free text while in REVIEW is the user's answer.
+  feature.filter(freeTextIn('review')).on('message:text', (ctx) => handleAnswer(deps, ctx));
 
-  // Non-text strays (sticker, photo, voice, …) are noise too — sweep them so only
-  // the flow message remains. Commands/text are handled above; this never matches
-  // a /command (it has text), so cross-feature command routing is unaffected. (§UX)
+  // Non-text strays (sticker, photo, voice, …) are noise — sweep them so only the flow
+  // message remains. Never matches a /command, so cross-feature routing is unaffected.
   feature
     .filter(nonTextIn('review'))
     .on('message', (ctx) => ctx.deleteMessage().catch(() => undefined));

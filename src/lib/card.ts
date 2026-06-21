@@ -6,7 +6,7 @@ export type WordSource = 'dictionary' | 'fallback';
 
 /** A word card ready to persist (design-doc.md §4, §11). Always RU→EN. */
 export interface WordCard {
-  /** Prompt shown during review/test — always a single Russian word. */
+  /** Prompt shown during the review session — always a single Russian word. */
   russian: string;
   /** The single accepted English answer. */
   english: string;

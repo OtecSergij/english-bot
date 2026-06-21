@@ -20,15 +20,24 @@ export const users = pgTable('users', {
   // System-tracked state (not a user-editable setting), so it lives on `users`,
   // not `settings`. NULL = never reviewed.
   lastReviewedOn: date('last_reviewed_on'),
+  // Behind-pace signal hysteresis (design-doc.md §5). Consecutive daily-send days the
+  // backlog stayed over the session size / cleared with room. Counters (not a bool)
+  // so a single day can't flip the nudge, and a fresh user (0) can't fire on day 1.
+  backlogStrikes: integer('backlog_strikes').notNull().default(0),
+  aheadStrikes: integer('ahead_strikes').notNull().default(0),
 });
 
 export const settings = pgTable('settings', {
   userId: integer('user_id')
     .primaryKey()
     .references(() => users.id, { onDelete: 'cascade' }),
-  reviewCount: integer('review_count').notNull().default(10),
+  // Daily session budget N — how many words one «повторение» run covers (capped by
+  // the deck via lib/srs reviewSessionSize).
+  sessionSize: integer('session_size').notNull().default(10),
+  // Cap on brand-new words introduced per session (design-doc.md §5). Reviews outrank
+  // new words: new ones backfill the budget only after due reviews. 0 = pause new words.
+  newPerDay: integer('new_per_day').notNull().default(5),
   reviewTime: time('review_time').notNull().default('09:00'),
-  testCount: integer('test_count').notNull().default(10),
   timezone: text('timezone').notNull().default('UTC'),
 });
 
@@ -47,13 +56,18 @@ export const words = pgTable(
     exampleEn: text('example_en'),
     nextReview: date('next_review').notNull(),
     intervalIndex: integer('interval_index').notNull().default(0),
+    // Lifetime failure count — leech detection (design-doc.md §7, surfacing deferred).
+    lapses: integer('lapses').notNull().default(0),
+    // NULL = never been in a session ("new"); set = seen (review/relearn). The
+    // new-vs-seen discriminator for selection (a new word and a failed-today word are
+    // identical on next_review/interval_index — only last_tested distinguishes them).
     lastTested: timestamp('last_tested', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    // Review selection: due words, most overdue first.
+    // Session selection: ready/overdue words, most overdue first; also the top-up order.
     index('words_review_idx').on(t.userId, t.nextReview),
-    // Test selection: not-due words, least-recently-tested first.
+    // New-vs-seen split: surfaces never-seen words (last_tested IS NULL) first.
     index('words_test_idx').on(t.userId, t.lastTested),
   ],
 );

@@ -2,16 +2,15 @@ import cron from 'node-cron';
 import { InlineKeyboard, type Bot } from 'grammy';
 import type { MyContext } from '../context';
 import type { DB } from '../db';
-import { getScheduledReviewCandidates, markReviewedToday } from '../db/users';
-import { countWords } from '../db/words';
+import { getScheduledReviewCandidates, markReviewedToday, updatePaceState } from '../db/users';
+import { countBacklog, countNewReady } from '../db/words';
 import { hhmm, timeInTz, todayInTz, type DateStr } from '../lib/dates';
-import { reviewSessionSize } from '../lib/srs';
 
 /**
  * Pure CHEAP fire-gate for the daily reminder (design-doc.md §5, §7) — time +
  * idempotency only, no DB input. The scheduler ALWAYS runs the daily reminder (no
  * "due" gate): a reminder just means "it's your review time and we haven't reminded
- * yet today"; what to review is left entirely to `startReview` (same as a manual
+ * yet today"; what to review is left entirely to `startSession` (same as a manual
  * `/repeat`). Side-effect-free so the rule is unit-tested apart from DB/Telegram.
  *
  * Deliberately takes NO deck size: the deck check needs a DB round-trip, so the tick
@@ -46,9 +45,69 @@ export function pluralRu(n: number, forms: [string, string, string]): string {
   return forms[2];
 }
 
-/** The reminder message + its single «Начать» button (callback `review:start`). */
-function reminderText(n: number): string {
-  return `🔔 Регулярное повторение: ${n} ${pluralRu(n, ['слово', 'слова', 'слов'])}.`;
+/** Consecutive over-budget days before the behind-pace nudge fires (design-doc.md §5). */
+export const PACE_STRIKE_LIMIT = 3;
+
+export interface PaceState {
+  backlogStrikes: number;
+  aheadStrikes: number;
+}
+
+/** A "you're falling behind" nudge with the session size to bump to. */
+export interface BehindNudge {
+  kind: 'behind';
+  /** Suggested new session size (≥ current N + 1), shown in the reminder. */
+  suggested: number;
+}
+
+/**
+ * Advance the behind-pace hysteresis on a daily evaluation (design-doc.md §5) and
+ * decide whether to nudge. Pure, so it's unit-tested apart from the DB/Telegram.
+ *
+ * `backlog` = words ready today; `sessionSize` = the budget N; `newReady` = brand-new
+ * words ready today (gates the nudge — no point telling someone to slow adding if
+ * they've stopped). Counters start at 0 (migration default), so the nudge cannot fire
+ * on day 1: it needs `limit` consecutive over-budget days, then re-fires daily until
+ * the backlog clears (the visibility the owner asked for). `aheadStrikes` accrues on
+ * fully-cleared days for a future "you're keeping up — add more" nudge (column
+ * shipped, delivery deferred).
+ */
+export function updatePaceCounters(args: {
+  backlog: number;
+  sessionSize: number;
+  newReady: number;
+  backlogStrikes: number;
+  aheadStrikes: number;
+  limit?: number;
+}): PaceState & { nudge: BehindNudge | null } {
+  const limit = args.limit ?? PACE_STRIKE_LIMIT;
+  let backlogStrikes = args.backlogStrikes;
+  let aheadStrikes = args.aheadStrikes;
+
+  if (args.backlog > args.sessionSize) {
+    backlogStrikes += 1;
+    aheadStrikes = 0;
+  } else if (args.backlog === 0) {
+    backlogStrikes = 0;
+    aheadStrikes += 1;
+  } else {
+    backlogStrikes = 0;
+    aheadStrikes = 0;
+  }
+
+  const nudge: BehindNudge | null =
+    backlogStrikes >= limit && args.newReady > 0
+      ? { kind: 'behind', suggested: Math.max(args.sessionSize + 1, args.backlog) }
+      : null;
+
+  return { backlogStrikes, aheadStrikes, nudge };
+}
+
+/** The reminder message (+ optional behind-pace nudge) and its «Начать» button. */
+function reminderText(n: number, nudge: BehindNudge | null): string {
+  const base = `🔔 Регулярное повторение: ${n} ${pluralRu(n, ['слово', 'слова', 'слов'])}.`;
+  if (!nudge) return base;
+  return `${base}\n\n⚠️ Очередь повторений растёт. Замедли добавление новых слов или подними «слов в день» до ${nudge.suggested} в настройках.`;
 }
 function reminderKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text('Начать', 'review:start');
@@ -56,11 +115,12 @@ function reminderKeyboard(): InlineKeyboard {
 
 /**
  * Daily review scheduler (design-doc.md §5, §7). An in-process per-minute cron (the
- * bot already runs continuously, so this is a `setInterval`, not an external job —
- * one indexed query per tick, negligible). Each tick: for every user, if it's their
- * `review_time` and today's reminder hasn't gone out, send a notification with a
- * «Начать» button. Tapping it routes through normal middleware into the same
- * `startReview` as `/repeat` — so the scheduler never injects session state itself.
+ * bot already runs continuously, so this is a `setInterval`, not an external job).
+ * Each tick applies the cheap time/idempotency gate first; the once-daily evaluation
+ * then counts the ready work and only sends when there's something to do (else a silent
+ * rest day), carrying the behind-pace nudge when the backlog has grown. Tapping
+ * «Начать» routes through normal middleware into the same `startSession` as `/repeat`
+ * — so the scheduler never injects session state itself.
  *
  * Returns a stop function for graceful shutdown.
  */
@@ -82,26 +142,45 @@ export function startScheduler(bot: Bot<MyContext>, db: DB): () => void {
           const nowHHMM = timeInTz(now, c.timezone);
           const reviewHHMM = hhmm(c.reviewTime); // 'HH:MM:SS' → 'HH:MM'
           // Cheap gate first (no DB): skips ~every tick (wrong time / already sent
-          // today) before we ever round-trip the deck count.
+          // today) before we ever round-trip the counts.
           if (!isReminderDue({ nowHHMM, reviewHHMM, lastReviewedOn: c.lastReviewedOn, today }))
             continue;
-          const deckSize = await countWords(db, c.userId);
-          if (deckSize <= 0) {
-            console.log(`Scheduler: user ${c.userId} review due but deck is empty`);
-            continue; // nothing in the deck — don't nag
-          }
 
-          // Session size the user will actually go through (shared rule with
-          // startReview, so the shown count can't drift from the real run — lib/srs).
-          const n = reviewSessionSize(c.reviewCount, deckSize);
-          await bot.api.sendMessage(c.tgChatId, reminderText(n), {
-            reply_markup: reminderKeyboard(),
+          // Once-daily evaluation (this branch runs once per day, after review_time).
+          const backlog = await countBacklog(db, c.userId, today);
+          const newReady = await countNewReady(db, c.userId, today);
+          const reviewsReady = backlog - newReady; // disjoint: backlog = reviews + new
+          // The REAL session size = exactly what selectSession (no top-up) will run, so
+          // the shown count can't drift from the actual session.
+          const n = Math.min(c.sessionSize, reviewsReady + Math.min(newReady, c.newPerDay));
+
+          const pace = updatePaceCounters({
+            backlog,
+            sessionSize: c.sessionSize,
+            newReady,
+            backlogStrikes: c.backlogStrikes,
+            aheadStrikes: c.aheadStrikes,
           });
-          // Stamp AFTER a successful send: a failed stamp (rare) re-nags next minute,
-          // which is far better than stamping first and silently skipping the day if
-          // the send fails.
+
+          // Fire only when there's real work; otherwise it's a silent rest day (nothing
+          // due, no new ready) — we still finalize the day below so we don't re-check
+          // every minute. The behind nudge rides the reminder (delivered only when sent).
+          if (n > 0) {
+            await bot.api.sendMessage(c.tgChatId, reminderText(n, pace.nudge), {
+              reply_markup: reminderKeyboard(),
+            });
+            console.log(`Scheduler: daily reminder sent to user ${c.userId} (${n} words)`);
+          }
+          // Finalize the day after a successful send (if any). Stamp FIRST so the day is
+          // idempotent before the pace write: if the stamp succeeds and the pace write
+          // then fails, we only lose one harmless increment — whereas the reverse order
+          // would re-fire next minute on a stamp failure and double-count the persisted
+          // pace bump. A send error skips both → clean re-evaluation next minute.
           await markReviewedToday(db, c.userId, today);
-          console.log(`Scheduler: daily reminder sent to user ${c.userId} (${n} words)`);
+          await updatePaceState(db, c.userId, {
+            backlogStrikes: pace.backlogStrikes,
+            aheadStrikes: pace.aheadStrikes,
+          });
         } catch (err) {
           console.error(`Scheduler: daily review failed for user ${c.userId}:`, err);
         }
