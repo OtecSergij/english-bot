@@ -48,7 +48,7 @@ src/
   index.ts            точка входа (бот + планировщик)
   bot.ts              сборка бота, whitelist, session, conversations, команды меню
   config.ts           загрузка и валидация env (вкл. выбор LLM-провайдера)
-  context.ts          типы контекста и сессии (FSM: idle/review/test)
+  context.ts          типы контекста и сессии (FSM: idle/review)
   domain.ts           кросс-доменные типы (Lang, Direction)
   db/
     schema.ts         таблицы users / settings / words (мультитенантно)
@@ -62,7 +62,8 @@ src/
     scheduler.ts      ежедневное повторение — STUB
   features/
     add.ts            добавление слова (§4) — реализовано
-    review.ts / test.ts / settings.ts — STUB-хендлеры
+    review.ts         повторение (активный ввод RU→EN) + тест-цикл (§5/§6)
+    settings.ts       настройки (§9)
   lib/
     lang.ts           определение языка по алфавиту
     card.ts           сборка карточки слова
