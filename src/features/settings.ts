@@ -2,9 +2,9 @@ import { Composer, InlineKeyboard, type Context } from 'grammy';
 import { config } from '../config';
 import type { MyContext } from '../context';
 import { ensureUser, getUserContext, updateSettings, type UserContext } from '../db/users';
-import { countWords } from '../db/words';
+import { countDueReviews, countNewPile, countWords } from '../db/words';
 import type { AppDeps } from '../deps';
-import { hhmm } from '../lib/dates';
+import { hhmm, todayInTz } from '../lib/dates';
 import { escapeHtml } from '../lib/html';
 import { clampInt, effectiveNewPerDay, sessionSizeMax, COUNT_MIN, NEW_PER_DAY_MAX } from '../lib/settings';
 import { reviewSessionSize } from '../lib/srs';
@@ -21,21 +21,32 @@ import { editFlow, deleteFlowMessage } from './flow';
  * `session_size` is capped by the deck size (design-doc.md §9): the EFFECTIVE value
  * shown/edited is `reviewSessionSize(stored, deck)` — the very number a session runs —
  * so the screen can't drift from the scheduler/`startSession`. `new_per_day` has no
- * deck cap, just [0, NEW_PER_DAY_MAX] (0 = pause new words). Time is hour-only.
+ * deck cap, just [1, NEW_PER_DAY_MAX]. Time is hour-only. The overview also shows a
+ * read-only queue line (due reviews + new pile) so the owner can see if N keeps up.
  */
 
 // ── Pure renderers (unit-tested) ────────────────────────────────────────────
+
+/** The read-only queue snapshot shown on the overview (design-doc.md §9). */
+export interface QueueInfo {
+  /** Learned words due/overdue (`next_review <= today`). */
+  dueReviews: number;
+  /** Never-seen words waiting to be introduced (`last_tested IS NULL`). */
+  newPile: number;
+}
 
 /** The overview screen. `session_size` is shown as its effective (deck-capped) value. */
 export function renderMain(
   s: { sessionSize: number; reviewTime: string; newPerDay: number; timezone: string },
   deckSize: number,
+  queue: QueueInfo,
 ): string {
   return [
     '⚙️ <b>Настройки</b>',
     '',
     `📚 Слов в день: <b>${reviewSessionSize(s.sessionSize, deckSize)}</b> (в колоде: ${deckSize})`,
     `🆕 Новых в день: <b>${effectiveNewPerDay(s.newPerDay)}</b>`,
+    `📊 В очереди: <b>${queue.dueReviews}</b> на повторение · <b>${queue.newPile}</b> новых`,
     `⏰ Время повторения: <b>${hhmm(s.reviewTime)}</b>`,
     '',
     `🌍 Таймзона: ${escapeHtml(s.timezone)}`,
@@ -127,12 +138,23 @@ async function loadOrToast(deps: AppDeps, ctx: MyContext): Promise<UserContext |
   return s;
 }
 
+/** Read the queue snapshot (due reviews + new pile) for the overview line (§9). */
+async function loadQueue(deps: AppDeps, s: UserContext): Promise<QueueInfo> {
+  const today = todayInTz(new Date(), s.timezone);
+  const [dueReviews, newPile] = await Promise.all([
+    countDueReviews(deps.db, s.userId, today),
+    countNewPile(deps.db, s.userId),
+  ]);
+  return { dueReviews, newPile };
+}
+
 async function showMain(deps: AppDeps, ctx: MyContext): Promise<void> {
   const s = await loadOrToast(deps, ctx);
   if (!s) return;
   const deck = await countWords(deps.db, s.userId);
+  const queue = await loadQueue(deps, s);
   await ctx.answerCallbackQuery();
-  await editPanel(ctx, renderMain(s, deck), mainKeyboard());
+  await editPanel(ctx, renderMain(s, deck, queue), mainKeyboard());
 }
 
 async function showSessionSize(deps: AppDeps, ctx: MyContext): Promise<void> {
@@ -197,10 +219,11 @@ async function setTime(deps: AppDeps, ctx: MyContext, hour: number): Promise<voi
   if (`${hh}:00:00` !== s.reviewTime)
     await updateSettings(deps.db, s.userId, { reviewTime: `${hh}:00` });
   const deck = await countWords(deps.db, s.userId);
+  const queue = await loadQueue(deps, s);
   await ctx.answerCallbackQuery();
   // A time pick is a single decisive choice → back to the overview (patch locally to
   // avoid a re-read; renderMain only looks at the 'HH:MM' prefix).
-  await editPanel(ctx, renderMain({ ...s, reviewTime: `${hh}:00:00` }, deck), mainKeyboard());
+  await editPanel(ctx, renderMain({ ...s, reviewTime: `${hh}:00:00` }, deck, queue), mainKeyboard());
 }
 
 export function createSettingsFeature(deps: AppDeps): Composer<MyContext> {
@@ -219,7 +242,8 @@ export function createSettingsFeature(deps: AppDeps): Composer<MyContext> {
       return;
     }
     const deck = await countWords(deps.db, s.userId);
-    await ctx.reply(renderMain(s, deck), { parse_mode: 'HTML', reply_markup: mainKeyboard() });
+    const queue = await loadQueue(deps, s);
+    await ctx.reply(renderMain(s, deck, queue), { parse_mode: 'HTML', reply_markup: mainKeyboard() });
   });
 
   feature.callbackQuery('set:nav:main', (ctx) => showMain(deps, ctx));

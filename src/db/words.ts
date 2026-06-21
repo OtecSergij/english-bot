@@ -130,13 +130,27 @@ export async function countBacklog(db: DB, userId: number, today: DateStr): Prom
 
 /**
  * Size of the new pile (never-seen words, `last_tested IS NULL`) — gates the behind-pace
- * nudge (no point nagging "slow adding" once the pile is empty) (design-doc.md §5).
+ * nudge (no point nagging "slow adding" once the pile is empty) and is shown in /settings
+ * (design-doc.md §5, §9).
  */
 export async function countNewPile(db: DB, userId: number): Promise<number> {
   const [row] = await db
     .select({ value: count() })
     .from(words)
     .where(and(eq(words.userId, userId), isNull(words.lastTested)));
+  return row?.value ?? 0;
+}
+
+/**
+ * Learned words that are due/overdue (`next_review <= today AND last_tested IS NOT NULL`)
+ * — the "to review" half of the /settings queue line (design-doc.md §9). Disjoint from the
+ * new pile, so the two displayed numbers never double-count the same word.
+ */
+export async function countDueReviews(db: DB, userId: number, today: DateStr): Promise<number> {
+  const [row] = await db
+    .select({ value: count() })
+    .from(words)
+    .where(and(eq(words.userId, userId), lte(words.nextReview, today), isNotNull(words.lastTested)));
   return row?.value ?? 0;
 }
 

@@ -79,23 +79,16 @@ function exampleLines(card: SessionCard): string[] {
 }
 
 /**
- * A question (design-doc.md §5): the counter, an optional ⚠️ note (e.g. wrong
- * input language), the Russian prompt, the Russian example as a hint (never the
- * English — that would leak the answer), then the ask. The counter is `done + 1` —
- * the 1-based position of the card being CLOSED; after a wrong answer it repeats on
- * the re-ask (honest: that card is still being closed, the cycle just brought it back).
+ * A question (design-doc.md §5): an optional ⚠️ note (e.g. wrong input language), the
+ * Russian prompt, and the Russian example as a hint (never the English — that would leak
+ * the answer). No counter and no "type the translation" line — the bold word + the
+ * «Показать ответ» button make the ask self-evident.
  */
-export function renderQuestion(
-  done: number,
-  total: number,
-  card: SessionCard,
-  note?: string,
-): string {
-  const lines = [`${done + 1}/${total}`];
-  if (note) lines.push('', note);
-  lines.push('', `<b>${escapeHtml(card.russian)}</b>`);
+export function renderQuestion(card: SessionCard, note?: string): string {
+  const lines: string[] = [];
+  if (note) lines.push(note, '');
+  lines.push(`<b>${escapeHtml(card.russian)}</b>`);
   if (card.exampleRu) lines.push(escapeHtml(card.exampleRu));
-  lines.push('', 'Напиши перевод на английский:');
   return lines.join('\n');
 }
 
@@ -104,21 +97,8 @@ export function renderQuestion(
  * AND the next question below it — so the correction stays visible while the user
  * answers the next word, with no «Дальше» tap (design-doc.md §5).
  */
-export function renderStep(
-  graded: SessionCard,
-  kind: ResultKind,
-  done: number,
-  total: number,
-  next: SessionCard,
-): string {
-  return [
-    resultHeader(kind, graded),
-    ...exampleLines(graded),
-    '',
-    SEP,
-    '',
-    renderQuestion(done, total, next),
-  ].join('\n');
+export function renderStep(graded: SessionCard, kind: ResultKind, next: SessionCard): string {
+  return [resultHeader(kind, graded), ...exampleLines(graded), SEP, renderQuestion(next)].join('\n');
 }
 
 /** End-of-session summary — kept in the chat as the result (to-do §UX). */
@@ -188,11 +168,10 @@ async function advanceStep(
     await finishSession(ctx, review);
     return;
   }
-  const done = review.cards.length - review.queue.length;
   await editFlow(
     ctx,
     review.messageId,
-    renderStep(graded.card, graded.kind, done, review.cards.length, nextCard),
+    renderStep(graded.card, graded.kind, nextCard),
     revealKeyboard(nextCard.id),
   );
 }
@@ -242,7 +221,7 @@ async function startSession(
   }
 
   const first = cards[0]!;
-  const text = renderQuestion(0, cards.length, first);
+  const text = renderQuestion(first);
   let messageId: number;
   if (opts.reuseMessageId !== undefined) {
     await editFlow(ctx, opts.reuseMessageId, text, revealKeyboard(first.id));
@@ -302,14 +281,8 @@ async function handleAnswer(deps: AppDeps, ctx: MyContext): Promise<void> {
     return;
   }
 
-  const done = review.cards.length - review.queue.length;
   const reprompt = (note: string): Promise<unknown> =>
-    editFlow(
-      ctx,
-      review.messageId,
-      renderQuestion(done, review.cards.length, card, note),
-      revealKeyboard(card.id),
-    );
+    editFlow(ctx, review.messageId, renderQuestion(card, note), revealKeyboard(card.id));
 
   // A blank/RU answer must NOT be graded (it would reset SRS); §6: answers are English only.
   if (input === '') {

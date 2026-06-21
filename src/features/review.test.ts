@@ -66,54 +66,47 @@ const card = (
   exampleEn: string | null = null,
 ): SessionCard => ({ id, russian, english, exampleRu, exampleEn, intervalIndex: 0 });
 
-test('renderQuestion counts 1-based and asks for the English translation', () => {
-  assert.equal(
-    renderQuestion(0, 10, card(1, 'дом', 'house')),
-    '1/10\n\n<b>дом</b>\n\nНапиши перевод на английский:',
-  );
-  assert.match(renderQuestion(9, 10, card(1, 'дом', 'house')), /^10\/10\n/);
+test('renderQuestion shows just the bold word (no counter, no prompt line)', () => {
+  assert.equal(renderQuestion(card(1, 'дом', 'house')), '<b>дом</b>');
 });
 
 test('renderQuestion keeps the Russian example as a hint (never the English)', () => {
   assert.equal(
-    renderQuestion(2, 9, card(1, 'дом', 'house', 'Мой дом большой.', 'My house is big.')),
-    '3/9\n\n<b>дом</b>\nМой дом большой.\n\nНапиши перевод на английский:',
+    renderQuestion(card(1, 'дом', 'house', 'Мой дом большой.', 'My house is big.')),
+    '<b>дом</b>\nМой дом большой.',
   );
 });
 
 test('renderQuestion inserts a ⚠️ note above the prompt', () => {
   assert.equal(
-    renderQuestion(0, 10, card(1, 'кот', 'cat'), '⚠️ Отвечай на английском.'),
-    '1/10\n\n⚠️ Отвечай на английском.\n\n<b>кот</b>\n\nНапиши перевод на английский:',
+    renderQuestion(card(1, 'кот', 'cat'), '⚠️ Отвечай на английском.'),
+    '⚠️ Отвечай на английском.\n\n<b>кот</b>',
   );
 });
 
 test('renderQuestion escapes HTML in the prompt', () => {
-  assert.equal(
-    renderQuestion(0, 1, card(1, 'a<b', 'x')),
-    '1/1\n\n<b>a&lt;b</b>\n\nНапиши перевод на английский:',
-  );
+  assert.equal(renderQuestion(card(1, 'a<b', 'x')), '<b>a&lt;b</b>');
 });
 
-test('renderStep shows the verdict + full card, then the next question in one message', () => {
+test('renderStep shows the verdict + full card, then the next word (no counter)', () => {
   const graded = card(1, 'собака', 'dog', 'Собака бежит.', 'The dog runs.');
   const next = card(2, 'кот', 'cat');
   assert.equal(
-    renderStep(graded, 'correct', 1, 3, next),
-    '✅ Верно! «собака» — «dog»\nСобака бежит.\nThe dog runs.\n\n— — —\n\n2/3\n\n<b>кот</b>\n\nНапиши перевод на английский:',
+    renderStep(graded, 'correct', next),
+    '✅ Верно! «собака» — «dog»\nСобака бежит.\nThe dog runs.\n— — —\n<b>кот</b>',
   );
 });
 
 test('renderStep marks a wrong answer and a reveal differently', () => {
   const graded = card(1, 'идти', 'walk');
   const next = card(2, 'кот', 'cat');
-  assert.match(renderStep(graded, 'wrong', 0, 2, next), /^❌ Неверно\. Правильно: «идти» — «walk»/);
-  assert.match(renderStep(graded, 'reveal', 0, 2, next), /^Ответ: «идти» — «walk»/);
+  assert.match(renderStep(graded, 'wrong', next), /^❌ Неверно\. Правильно: «идти» — «walk»/);
+  assert.match(renderStep(graded, 'reveal', next), /^Ответ: «идти» — «walk»/);
 });
 
 test('renderStep escapes HTML in the graded card', () => {
   assert.match(
-    renderStep(card(1, 'a<b', 'x&y'), 'correct', 0, 2, card(2, 'кот', 'cat')),
+    renderStep(card(1, 'a<b', 'x&y'), 'correct', card(2, 'кот', 'cat')),
     /«a&lt;b» — «x&amp;y»/,
   );
 });
