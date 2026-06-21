@@ -7,7 +7,8 @@ export const COUNT_MIN = 1;
 
 /**
  * Ceiling for `new_per_day` — a sane upper bound that also stops the stepper from
- * running away. The lower bound is 0 (pause new words; reviews still run). Tunable.
+ * running away. The lower bound is COUNT_MIN (1): always introduce ≥1 new word/day while
+ * the new pile lasts; pausing new entirely (0) is intentionally not allowed. Tunable.
  */
 export const NEW_PER_DAY_MAX = 20;
 
@@ -27,7 +28,7 @@ export function sessionSizeMax(deckSize: number): number {
   return Math.max(COUNT_MIN, deckSize);
 }
 
-/** Effective `new_per_day`: stored value clamped into [0, NEW_PER_DAY_MAX]. */
+/** Effective `new_per_day`: stored value clamped into [COUNT_MIN, NEW_PER_DAY_MAX]. */
 export function effectiveNewPerDay(stored: number): number {
-  return clampInt(stored, 0, NEW_PER_DAY_MAX);
+  return clampInt(stored, COUNT_MIN, NEW_PER_DAY_MAX);
 }

@@ -199,14 +199,14 @@ async function advanceStep(
 
 /**
  * Start a «повторение» session (design-doc.md §5) — the single active-recall flow.
- * `includeTopUp` distinguishes a manual `/repeat` (drill ahead with not-yet-due words
- * when caught up) from the scheduled «Начать» (due/new work only, respecting spacing).
- * `reuseMessageId` edits the scheduler's reminder message into the first question.
+ * Manual `/repeat` and the scheduled «Начать» are identical (always N words); the only
+ * difference is `reuseMessageId`, which edits the scheduler's reminder message into the
+ * first question instead of sending a fresh one.
  */
 async function startSession(
   deps: AppDeps,
   ctx: MyContext,
-  opts: { reuseMessageId?: number; includeTopUp: boolean },
+  opts: { reuseMessageId?: number },
 ): Promise<void> {
   const chatId = ctx.chat?.id;
   if (chatId === undefined) return;
@@ -230,15 +230,12 @@ async function startSession(
   }
 
   const today = todayInTz(new Date(now), user.timezone);
-  const cards = await selectSession(deps.db, user.userId, today, user.sessionSize, user.newPerDay, {
-    includeTopUp: opts.includeTopUp,
-  });
+  const cards = await selectSession(deps.db, user.userId, user.sessionSize, user.newPerDay);
   if (cards.length === 0) {
-    // No stamp here (unlike a started session): selection is date-based, so an empty
-    // morning /repeat means the scheduler also sees no work at review_time and takes a
-    // silent rest day (which stamps) — there's nothing to suppress.
+    // Empty only when the deck itself is empty (always-N otherwise) — no stamp, nothing
+    // to suppress.
     resetSession(ctx);
-    const msg = 'На сегодня всё повторено. Добавь новые слова или загляни позже.';
+    const msg = 'В словаре пока нет слов — добавь хотя бы одно.';
     if (opts.reuseMessageId !== undefined) await editFlow(ctx, opts.reuseMessageId, msg);
     else await ctx.reply(msg);
     return;
@@ -406,20 +403,16 @@ export function createReviewFeature(deps: AppDeps): Composer<MyContext> {
   const feature = new Composer<MyContext>();
 
   // Manual start. The "/repeat" command itself is removed so the chat stays at the
-  // single flow message. Manual runs drill ahead (top-up) when caught up.
+  // single flow message. Identical to the scheduled run — always N words.
   feature.command('repeat', async (ctx) => {
     await ctx.deleteMessage().catch(() => undefined);
-    await startSession(deps, ctx, { includeTopUp: true });
+    await startSession(deps, ctx, {});
   });
 
-  // The scheduler's «Начать» button reuses the reminder message; scheduled runs cover
-  // only due/new work (no top-up) so they respect spacing.
+  // The scheduler's «Начать» button reuses the reminder message; same session as /repeat.
   feature.callbackQuery('review:start', async (ctx) => {
     await ctx.answerCallbackQuery();
-    await startSession(deps, ctx, {
-      reuseMessageId: ctx.callbackQuery.message?.message_id,
-      includeTopUp: false,
-    });
+    await startSession(deps, ctx, { reuseMessageId: ctx.callbackQuery.message?.message_id });
   });
 
   feature.callbackQuery(/^review:reveal:(\d+)$/, (ctx) => handleReveal(deps, ctx));

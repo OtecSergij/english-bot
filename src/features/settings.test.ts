@@ -28,9 +28,9 @@ test('renderMain caps the session size at the deck size (effective value)', () =
   assert.match(text, /Слов в день: <b>4<\/b> \(в колоде: 4\)/);
 });
 
-test('renderMain clamps new-per-day into [0, NEW_PER_DAY_MAX] for display', () => {
+test('renderMain clamps new-per-day into [1, NEW_PER_DAY_MAX] for display', () => {
   assert.match(renderMain({ ...base, newPerDay: 999 }, 23), /Новых в день: <b>20<\/b>/);
-  assert.match(renderMain({ ...base, newPerDay: 0 }, 23), /Новых в день: <b>0<\/b>/);
+  assert.match(renderMain({ ...base, newPerDay: 0 }, 23), /Новых в день: <b>1<\/b>/); // 0 clamps to 1
 });
 
 test('renderSessionSizeEditor shows the value and the deck cap', () => {
@@ -43,10 +43,10 @@ test('renderSessionSizeEditor floors the cap at 1 for an empty deck', () => {
   assert.match(renderSessionSizeEditor(1, 0), /Колода: 0 · максимум 1/);
 });
 
-test('renderNewPerDayEditor shows the value and the range incl. the 0 floor', () => {
+test('renderNewPerDayEditor shows the value and the range (min 1)', () => {
   const text = renderNewPerDayEditor(5);
   assert.match(text, /Сейчас: <b>5<\/b>/);
-  assert.match(text, /Диапазон: 0–20/);
+  assert.match(text, /Диапазон: 1–20/);
 });
 
 test('renderTimePicker shows the current HH:MM and timezone', () => {

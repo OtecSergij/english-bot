@@ -45,31 +45,23 @@ export function reviewSessionSize(sessionSize: number, deckSize: number): number
 }
 
 /**
- * Compose the daily session from the three selection buckets (design-doc.md §5), in
- * strict priority order:
- *   1. `reviewsReady` — due words seen before (most-overdue-first): the starvation
- *      guarantee, every word eventually reaches the front.
- *   2. `newReady` — brand-new words (already capped to `new_per_day` by the caller):
- *      reviews outrank new intake, so new words only fill leftover budget.
- *   3. `topUp` — not-yet-due seen words (manual `/repeat` only; empty for the
- *      scheduled run, which respects spacing): keeps a manual session full.
- * Deduped by id and sliced to the budget `n`. Pure, so the budget logic is unit-tested
- * apart from the DB; the result is naturally bounded by the available cards (an empty
- * bucket set yields `[]` regardless of `n` — no phantom cards).
+ * Compose the daily «повторение» session (design-doc.md §5): always up to `sessionSize`
+ * words — `newPerDay` new words (the new-intake cap), the rest filled with the most-mature
+ * learned words (smallest `next_review` first, passed pre-sorted). No due gate: we always
+ * show the most-mature learned words, due or not (always-N for a daily habit). New and
+ * learned are disjoint by construction (`last_tested` NULL vs set), so no dedupe is needed.
+ * The result is bounded by what's available — a fresh deck yields just the new picks, a
+ * deck with no new words yields just the learned fill. Pure, so it's unit-tested apart
+ * from the DB. Order: learned (the review warm-up) first, new last.
  */
-export function planSession<T extends { id: number }>(
-  reviewsReady: T[],
-  newReady: T[],
-  topUp: T[],
-  n: number,
+export function composeSession<T extends { id: number }>(
+  learned: T[],
+  newPile: T[],
+  sessionSize: number,
+  newPerDay: number,
 ): T[] {
-  const seen = new Set<number>();
-  const out: T[] = [];
-  for (const card of [...reviewsReady, ...newReady, ...topUp]) {
-    if (out.length >= n) break;
-    if (seen.has(card.id)) continue;
-    seen.add(card.id);
-    out.push(card);
-  }
-  return out;
+  const newCount = Math.min(Math.max(0, newPerDay), newPile.length, sessionSize);
+  const need = sessionSize - newCount;
+  const learnedPicks = need > 0 ? learned.slice(0, need) : [];
+  return [...learnedPicks, ...newPile.slice(0, newCount)];
 }

@@ -3,7 +3,7 @@ import { InlineKeyboard, type Bot } from 'grammy';
 import type { MyContext } from '../context';
 import type { DB } from '../db';
 import { getScheduledReviewCandidates, markReviewedToday, updatePaceState } from '../db/users';
-import { countBacklog, countNewReady } from '../db/words';
+import { countBacklog, countNewPile, countWords } from '../db/words';
 import { hhmm, timeInTz, todayInTz, type DateStr } from '../lib/dates';
 
 /**
@@ -117,10 +117,10 @@ function reminderKeyboard(): InlineKeyboard {
  * Daily review scheduler (design-doc.md §5, §7). An in-process per-minute cron (the
  * bot already runs continuously, so this is a `setInterval`, not an external job).
  * Each tick applies the cheap time/idempotency gate first; the once-daily evaluation
- * then counts the ready work and only sends when there's something to do (else a silent
- * rest day), carrying the behind-pace nudge when the backlog has grown. Tapping
- * «Начать» routes through normal middleware into the same `startSession` as `/repeat`
- * — so the scheduler never injects session state itself.
+ * then sends a reminder whenever the deck is non-empty (always-N model — no rest days),
+ * carrying the behind-pace nudge when words are coming due faster than N/day clears them.
+ * Tapping «Начать» routes through normal middleware into the same `startSession` as
+ * `/repeat` — so the scheduler never injects session state itself.
  *
  * Returns a stop function for graceful shutdown.
  */
@@ -147,30 +147,29 @@ export function startScheduler(bot: Bot<MyContext>, db: DB): () => void {
             continue;
 
           // Once-daily evaluation (this branch runs once per day, after review_time).
+          const deckSize = await countWords(db, c.userId);
+          if (deckSize <= 0) continue; // empty deck — nothing to learn yet, don't nag
+          const newPile = await countNewPile(db, c.userId);
           const backlog = await countBacklog(db, c.userId, today);
-          const newReady = await countNewReady(db, c.userId, today);
-          const reviewsReady = backlog - newReady; // disjoint: backlog = reviews + new
-          // The REAL session size = exactly what selectSession (no top-up) will run, so
-          // the shown count can't drift from the actual session.
-          const n = Math.min(c.sessionSize, reviewsReady + Math.min(newReady, c.newPerDay));
+          // The REAL session size = exactly what composeSession/selectSession will run, so
+          // the shown count can't drift: new (capped) + the learned fill, bounded by N.
+          const newCount = Math.min(c.newPerDay, newPile, c.sessionSize);
+          const n = Math.min(c.sessionSize, newCount + (deckSize - newPile));
 
           const pace = updatePaceCounters({
             backlog,
             sessionSize: c.sessionSize,
-            newReady,
+            newReady: newPile,
             backlogStrikes: c.backlogStrikes,
             aheadStrikes: c.aheadStrikes,
           });
 
-          // Fire only when there's real work; otherwise it's a silent rest day (nothing
-          // due, no new ready) — we still finalize the day below so we don't re-check
-          // every minute. The behind nudge rides the reminder (delivered only when sent).
-          if (n > 0) {
-            await bot.api.sendMessage(c.tgChatId, reminderText(n, pace.nudge), {
-              reply_markup: reminderKeyboard(),
-            });
-            console.log(`Scheduler: daily reminder sent to user ${c.userId} (${n} words)`);
-          }
+          // Always send while the deck is non-empty (always-N model — no rest days). The
+          // behind nudge ("more is coming due than N/day clears — raise N") rides along.
+          await bot.api.sendMessage(c.tgChatId, reminderText(n, pace.nudge), {
+            reply_markup: reminderKeyboard(),
+          });
+          console.log(`Scheduler: daily reminder sent to user ${c.userId} (${n} words)`);
           // Finalize the day after a successful send (if any). Stamp FIRST so the day is
           // idempotent before the pace write: if the stamp succeeds and the pace write
           // then fails, we only lose one harmless increment — whereas the reverse order

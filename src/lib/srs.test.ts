@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import {
   clampIndex,
   intervalDays,
+  composeSession,
   nextReviewDate,
-  planSession,
   promote,
   reset,
   reviewSessionSize,
@@ -45,22 +45,30 @@ test('reviewSessionSize caps by deck, floors at 1, guards a bad session size', (
 const ids = (cards: { id: number }[]): number[] => cards.map((c) => c.id);
 const c = (id: number): { id: number } => ({ id });
 
-test('planSession fills reviews-first, then new, then top-up, in priority order', () => {
-  assert.deepEqual(ids(planSession([c(1), c(2)], [c(3)], [c(4)], 10)), [1, 2, 3, 4]);
+test('composeSession fills new (≤ cap) then learned, always N — the owner example', () => {
+  // 100 learned (ids 1..100 by maturity), 3 new (201..203), N=5, cap=2 → 3 learned + 2 new.
+  const learned = Array.from({ length: 100 }, (_, i) => c(i + 1));
+  assert.deepEqual(ids(composeSession(learned, [c(201), c(202), c(203)], 5, 2)), [1, 2, 3, 201, 202]);
 });
 
-test('planSession slices to the budget N (reviews can crowd out new/top-up)', () => {
-  assert.deepEqual(ids(planSession([c(1), c(2), c(3)], [c(4)], [c(5)], 2)), [1, 2]);
+test('composeSession: as the new pile shrinks, learned fill grows to keep N', () => {
+  const learned = [c(1), c(2), c(3), c(4), c(5)];
+  assert.deepEqual(ids(composeSession(learned, [c(201)], 5, 2)), [1, 2, 3, 4, 201]); // 4 + 1
+  assert.deepEqual(ids(composeSession(learned, [], 5, 2)), [1, 2, 3, 4, 5]); // pile empty → all learned
 });
 
-test('planSession dedupes by id across buckets', () => {
-  assert.deepEqual(ids(planSession([c(1)], [c(1)], [c(2)], 10)), [1, 2]);
+test('composeSession caps new intake at new_per_day even with a big pile', () => {
+  assert.deepEqual(ids(composeSession([c(1), c(2), c(3)], [c(201), c(202), c(203), c(204)], 5, 2)), [
+    1, 2, 3, 201, 202,
+  ]);
 });
 
-test('planSession top-up only fills the leftover budget', () => {
-  assert.deepEqual(ids(planSession([c(1)], [], [c(2), c(3)], 2)), [1, 2]);
+test('composeSession is bounded by what exists (fresh / small / empty deck)', () => {
+  assert.deepEqual(ids(composeSession([], [c(201), c(202), c(203)], 5, 2)), [201, 202]); // fresh: only cap new
+  assert.deepEqual(ids(composeSession([c(1), c(2)], [], 5, 2)), [1, 2]); // 2-word deck < N
+  assert.deepEqual(composeSession([], [], 5, 2), []); // empty deck
 });
 
-test('planSession returns empty when all buckets are empty (no phantom cards)', () => {
-  assert.deepEqual(planSession([], [], [], 5), []);
+test('composeSession never exceeds N (new_per_day ≥ N)', () => {
+  assert.deepEqual(ids(composeSession([], [c(201), c(202), c(203)], 2, 5)), [201, 202]);
 });

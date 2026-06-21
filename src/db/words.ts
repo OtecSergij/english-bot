@@ -1,7 +1,7 @@
-import { and, asc, count, eq, gt, isNotNull, isNull, lte, sql } from 'drizzle-orm';
+import { and, asc, count, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 import type { DB } from './index';
 import { words } from './schema';
-import { planSession } from '../lib/srs';
+import { composeSession } from '../lib/srs';
 import type { WordCard } from '../lib/card';
 import type { DateStr } from '../lib/dates';
 
@@ -79,60 +79,46 @@ export async function countWords(db: DB, userId: number): Promise<number> {
 }
 
 /**
- * The daily session (design-doc.md §5): a budget of `sessionSize` words filled
- * reviews-first from three buckets, all gated on "ready today" (`next_review <= today`):
- *   1. reviewsReady — due words seen before (`last_tested IS NOT NULL`), most overdue first.
- *   2. newReady — brand-new words (`last_tested IS NULL`), oldest first, capped to `newPerDay`.
- *   3. topUp (manual `/repeat` only) — not-yet-due seen words, nearest due first.
- * `planSession` (lib/srs, pure) concatenates in that priority order, dedupes, and
- * slices to the budget. The caller SNAPSHOTS this once — grading mutates
- * `next_review` / `last_tested`, which would reorder a mid-session re-query.
- * The `topUp` filter keeps `last_tested IS NOT NULL` so it never re-pulls the new
- * words already owned by `newReady` (and capped by it).
+ * The daily «повторение» session (design-doc.md §5): always up to `sessionSize` words,
+ * filled new-first then with the most-mature learned words. NO due gate — the learned
+ * fill is the smallest-`next_review` words whether or not they're "due" (always-N for a
+ * daily habit). Manual `/repeat` and the scheduled run are identical. The two buckets are
+ * disjoint (`last_tested` NULL vs set); `composeSession` (lib/srs, pure) sizes new vs
+ * learned. The caller SNAPSHOTS this once — grading mutates `next_review` / `last_tested`,
+ * which would reorder a mid-session re-query.
  */
 export async function selectSession(
   db: DB,
   userId: number,
-  today: DateStr,
   sessionSize: number,
   newPerDay: number,
-  opts: { includeTopUp: boolean },
 ): Promise<SessionCard[]> {
-  const reviewsReady = await db
-    .select(sessionCardColumns)
-    .from(words)
-    .where(and(eq(words.userId, userId), lte(words.nextReview, today), isNotNull(words.lastTested)))
-    .orderBy(asc(words.nextReview), asc(words.createdAt), asc(words.id))
-    .limit(sessionSize);
-
-  const newReady =
+  // New pile: never-seen words, oldest first, capped to the per-session new cap.
+  const newPile =
     newPerDay > 0
       ? await db
           .select(sessionCardColumns)
           .from(words)
-          .where(
-            and(eq(words.userId, userId), lte(words.nextReview, today), isNull(words.lastTested)),
-          )
+          .where(and(eq(words.userId, userId), isNull(words.lastTested)))
           .orderBy(asc(words.createdAt), asc(words.id))
-          .limit(newPerDay)
+          .limit(Math.min(newPerDay, sessionSize))
       : [];
-
-  const topUp = opts.includeTopUp
-    ? await db
-        .select(sessionCardColumns)
-        .from(words)
-        .where(and(eq(words.userId, userId), gt(words.nextReview, today), isNotNull(words.lastTested)))
-        .orderBy(asc(words.nextReview), asc(words.id))
-        .limit(sessionSize)
-    : [];
-
-  return planSession(reviewsReady, newReady, topUp, sessionSize);
+  // Learned fill: seen words, most mature first (smallest next_review); composeSession
+  // takes only the leftover budget after the new picks.
+  const learned = await db
+    .select(sessionCardColumns)
+    .from(words)
+    .where(and(eq(words.userId, userId), isNotNull(words.lastTested)))
+    .orderBy(asc(words.nextReview), asc(words.createdAt), asc(words.id))
+    .limit(sessionSize);
+  return composeSession(learned, newPile, sessionSize, newPerDay);
 }
 
 /**
- * Words ready today (`next_review <= today`) — the behind-pace pressure scalar
- * (design-doc.md §5). Counts both overdue reviews and overdue-new words; the
- * scheduler compares it against the session size for the "you're falling behind" nudge.
+ * Overdue words (`next_review <= today`) — the behind-pace pressure scalar (design-doc.md
+ * §5). Even with the always-N model (no due gate), this measures whether words are coming
+ * due faster than N/day clears them; the scheduler compares it against the session size
+ * for the "you're falling behind, raise N" nudge.
  */
 export async function countBacklog(db: DB, userId: number, today: DateStr): Promise<number> {
   const [row] = await db
@@ -143,14 +129,14 @@ export async function countBacklog(db: DB, userId: number, today: DateStr): Prom
 }
 
 /**
- * Brand-new words (never seen) whose start day has arrived — the scheduler's
- * new-bucket size, used to compute the real session count and to gate the behind nudge.
+ * Size of the new pile (never-seen words, `last_tested IS NULL`) — gates the behind-pace
+ * nudge (no point nagging "slow adding" once the pile is empty) (design-doc.md §5).
  */
-export async function countNewReady(db: DB, userId: number, today: DateStr): Promise<number> {
+export async function countNewPile(db: DB, userId: number): Promise<number> {
   const [row] = await db
     .select({ value: count() })
     .from(words)
-    .where(and(eq(words.userId, userId), lte(words.nextReview, today), isNull(words.lastTested)));
+    .where(and(eq(words.userId, userId), isNull(words.lastTested)));
   return row?.value ?? 0;
 }
 

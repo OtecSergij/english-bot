@@ -21,9 +21,9 @@ test('sessionSizeMax is the deck size, floored at 1', () => {
   assert.equal(sessionSizeMax(0), COUNT_MIN); // empty deck still allows the floor
 });
 
-test('effectiveNewPerDay clamps the stored value into [0, NEW_PER_DAY_MAX]', () => {
+test('effectiveNewPerDay clamps the stored value into [COUNT_MIN, NEW_PER_DAY_MAX]', () => {
   assert.equal(effectiveNewPerDay(5), 5);
-  assert.equal(effectiveNewPerDay(0), 0); // 0 is valid — pause new words
-  assert.equal(effectiveNewPerDay(-5), 0); // floor
+  assert.equal(effectiveNewPerDay(0), COUNT_MIN); // 0 not allowed — clamps to 1
+  assert.equal(effectiveNewPerDay(-5), COUNT_MIN); // floor
   assert.equal(effectiveNewPerDay(999), NEW_PER_DAY_MAX); // ceiling
 });

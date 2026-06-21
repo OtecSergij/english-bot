@@ -52,13 +52,13 @@ export function renderSessionSizeEditor(value: number, deckSize: number): string
   ].join('\n');
 }
 
-/** The new-per-day editor: current effective value + the fixed range (min 0 = pause). */
+/** The new-per-day editor: current effective value + the fixed range. */
 export function renderNewPerDayEditor(value: number): string {
   return [
     '🆕 <b>Новых слов в день</b>',
     '',
     `Сейчас: <b>${value}</b>`,
-    `Диапазон: 0–${NEW_PER_DAY_MAX} (0 — пауза новых)`,
+    `Диапазон: ${COUNT_MIN}–${NEW_PER_DAY_MAX}`,
   ].join('\n');
 }
 
@@ -184,7 +184,7 @@ async function stepNewPerDay(deps: AppDeps, ctx: MyContext, delta: number): Prom
   const s = await loadOrToast(deps, ctx);
   if (!s) return;
   const eff = effectiveNewPerDay(s.newPerDay);
-  const next = clampInt(eff + delta, 0, NEW_PER_DAY_MAX); // min 0 — pausing new words is valid
+  const next = clampInt(eff + delta, COUNT_MIN, NEW_PER_DAY_MAX); // min 1 — new can't be paused
   if (next !== eff) await updateSettings(deps.db, s.userId, { newPerDay: next });
   await ctx.answerCallbackQuery();
   await editPanel(ctx, renderNewPerDayEditor(next), stepperKeyboard('np'));
